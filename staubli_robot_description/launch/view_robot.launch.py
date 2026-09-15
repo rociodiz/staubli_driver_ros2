@@ -29,6 +29,7 @@ def generate_launch_description():
             "robot_model",
             description="Model of the robot (e.g, 'tx2_60l').",
             choices=[
+                "tx2_60",
                 "tx2_60l",
                 "tx2_60l_med",
             ],

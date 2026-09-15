@@ -271,20 +271,31 @@
         <xacro:property name="link_inertia_iyz" value="${dynamics_config[link_name]['inertia']['iyz']}"/>
         <xacro:property name="link_inertia_izz" value="${dynamics_config[link_name]['inertia']['izz']}"/>
 
+        <xacro:property name="visual_params" value="${meshes_config[link_name]['visual']}"/>
+        <xacro:property name="visual_origin_xyz" value="${visual_params['origin']['xyz'] if 'origin' in visual_params else '0 0 0'}"/>
+        <xacro:property name="visual_origin_rpy" value="${visual_params['origin']['rpy'] if 'origin' in visual_params else '0 0 0'}"/>
+
+        <xacro:property name="collision_params" value="${meshes_config[link_name]['collision']}"/>
+        <xacro:property name="collision_origin_xyz" value="${collision_params['origin']['xyz'] if 'origin' in collision_params else '0 0 0'}"/>
+        <xacro:property name="collision_origin_rpy" value="${collision_params['origin']['rpy'] if 'origin' in collision_params else '0 0 0'}"/>
+
+        <xacro:property name="visual_material"
+            value="${visual_params['material'] if 'material' in visual_params else None}"/>
+
         <link name="${robot_prefix}${link_name}">
             <visual>
-                <!-- TODO(tpoignonec): Add registration for visual mesh -->
-                <origin xyz="0 0 0" rpy="0 0 0"/>
+                <origin xyz="${visual_origin_xyz}" rpy="${visual_origin_rpy}"/>
                 <geometry>
                     <xacro:get_mesh link_name="${link_name}" type="visual"/>
                 </geometry>
-                <!-- TODO(tpoignonec): Add parameter to override color?
-                <xacro:get_material link_name="${link_name}" type="visual"/>
-                -->
+                <xacro:if value="${visual_material is not None}">
+                    <material name="${visual_material}">
+                        <color rgba="${color_staubli_yellow}"/>
+                    </material>
+                </xacro:if>
             </visual>
             <collision>
-                <!-- TODO(tpoignonec): Add registration for visual mesh -->
-                <origin xyz="0 0 0" rpy="0 0 0"/>
+                <origin xyz="${collision_origin_xyz}" rpy="${collision_origin_rpy}"/>
                 <geometry>
                     <xacro:get_mesh link_name="${link_name}" type="collision"/>
                 </geometry>

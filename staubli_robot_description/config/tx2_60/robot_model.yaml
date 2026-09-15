@@ -1,0 +1,32 @@
+# Robot model configuration for Staubli TX2-60
+
+# This file defines the architecture of the robot, including link and joint names.
+# It is used in conjunction with the appropriate configurations for dynamics,
+# kinematics, joint limits, and meshes.
+# In addition, hardware-specific parameters can be defined here as needed for IOs,
+# F/T sensor, end-effector, etc.
+
+robot_model:
+  # General robot capabilities
+  has_joint_torque_sensor: false  # Whether the robot provides joint torque measurements
+  has_ft_sensor: false  # Whether the robot has a force/torque sensor at the end-effector
+
+  end_effector:
+    # Config of the end-effector frame (tool0)
+    parent_link: link_6  # Parent link of the end-effector (last robot link or F/T sensor if present)
+    # Transformation from parent_link to end_effector
+    xyz: [0.0, 0.0, 0.07]
+    rpy: [0.0, 0.0, 0.0]
+
+  io:
+    num_digital_inputs: 16   # Number of digital inputs
+    num_digital_outputs: 16  # Number of digital outputs
+    num_analog_inputs: 2     # Number of analog inputs
+    num_analog_outputs: 2    # Number of analog outputs
+
+  # F/T sensor configuration (OPTIONAL, see "has_ft_sensor" above)
+  # ft_sensor:
+  #   parent_link: link_6  # Parent link of the end-effector
+  #   # Transformation from parent_link to ft_sensor frame
+  #   xyz: [0.0, 0.0, 0.0]  # Position of the sensor frame relative to parent_link
+  #   rpy: [0.0, 0.0, 0.0]  # Orientation of the sensor frame relative to parent_link

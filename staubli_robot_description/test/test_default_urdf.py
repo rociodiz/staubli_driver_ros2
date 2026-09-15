@@ -27,6 +27,7 @@ import pytest
 ROBOT_MODELS = [
     "tx2_60l",
     "tx2_60l_med",
+    "tx2_60",
     # Add other robot models here as needed
 ]
 
