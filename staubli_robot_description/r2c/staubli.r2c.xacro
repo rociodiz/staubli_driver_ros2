@@ -13,6 +13,7 @@
         joint_limits_parameters_file:=^
         initial_positions_file:=^
         use_mock_hardware:=^
+        use_gazebo_hardware:=false
         mock_sensor_commands:=^
     ">
 
@@ -22,35 +23,59 @@
 
     <ros2_control name="${name}" type="system">
         <hardware>
-            <xacro:if value="${use_mock_hardware}">
-                <plugin>mock_components/GenericSystem</plugin>
-                <param name="calculate_dynamics">true</param>
-                <param name="state_following_offset">0.0</param>
-                <param name="mock_sensor_commands">${mock_sensor_commands}</param>
+            <!-- Selección del plugin de hardware.
+                 - use_gazebo_hardware=true  -> gz_ros2_control (simulación Gazebo Sim).
+                   Se usa `gz_ros2_control/GazeboSimSystem` porque es el plugin que
+                   Hace de puente entre el estado/comandos de las articulaciones
+                   de ros2_control y el motor de física de Gazebo Sim dentro del proceso de gz-sim.
+                 - use_mock_hardware=true    -> mock_components/GenericSystem (sin hardware).
+                 - ambos false               -> staubli_robot_driver/StaubliHardwareInterface
+                   (robot real CS9, comunicado por UDP).
+                 El default es no-Gazebo (use_gazebo_hardware=false) para no alterar el
+                 comportamiento actual de mock y hardware real. -->
+            <xacro:if value="${use_gazebo_hardware}">
+                <plugin>gz_ros2_control/GazeboSimSystem</plugin>
             </xacro:if>
-            <xacro:unless value="${use_mock_hardware}">
-                <plugin>staubli_robot_driver/StaubliHardwareInterface</plugin>
-                <param name="robot_prefix">${robot_prefix}</param>
-                <param name="robot_ip">${robot_ip}</param>
-                <param name="control_port">11000</param>
-                <param name="diagnostic_port">11001</param>
-                <param name="local_control_port">11000</param>
-                <param name="local_diagnostic_port">11001</param>
-                <param name="num_digital_inputs">${num_digital_inputs}</param>
-                <param name="num_digital_outputs">${num_digital_outputs}</param>
-                <param name="num_analog_inputs">${num_analog_inputs}</param>
-                <param name="num_analog_outputs">${num_analog_outputs}</param>
+            <xacro:unless value="${use_gazebo_hardware}">
+                <xacro:if value="${use_mock_hardware}">
+                    <plugin>mock_components/GenericSystem</plugin>
+                    <param name="calculate_dynamics">true</param>
+                    <param name="state_following_offset">0.0</param>
+                    <param name="mock_sensor_commands">${mock_sensor_commands}</param>
+                </xacro:if>
+                <xacro:unless value="${use_mock_hardware}">
+                    <plugin>staubli_robot_driver/StaubliHardwareInterface</plugin>
+                    <param name="robot_prefix">${robot_prefix}</param>
+                    <param name="robot_ip">${robot_ip}</param>
+                    <param name="control_port">11000</param>
+                    <param name="diagnostic_port">11001</param>
+                    <param name="local_control_port">11000</param>
+                    <param name="local_diagnostic_port">11001</param>
+                    <param name="num_digital_inputs">${num_digital_inputs}</param>
+                    <param name="num_digital_outputs">${num_digital_outputs}</param>
+                    <param name="num_analog_inputs">${num_analog_inputs}</param>
+                    <param name="num_analog_outputs">${num_analog_outputs}</param>
+                </xacro:unless>
             </xacro:unless>
         </hardware>
 
         <!-- Actuated joints -->
 
-        <xacro:if value="${use_mock_hardware}">
+        <!-- El comando de aceleración solo existe en el hardware real:
+             se usa únicamente para definir los límites de aceleración.
+             En mock y en Gazebo Sim (GazeboSimSystem) no se usa, porque
+             GazeboSimSystem no expone interfaz de comando `acceleration`. -->
+        <xacro:if value="${use_gazebo_hardware}">
             <xacro:property name="include_acceleration_command" value="false"/>
         </xacro:if>
-        <xacro:unless value="${use_mock_hardware}">
-             <!-- Note: acceleration command interface is ONLY used to set the acceleration limits... -->
-            <xacro:property name="include_acceleration_command" value="true"/>
+        <xacro:unless value="${use_gazebo_hardware}">
+            <xacro:if value="${use_mock_hardware}">
+                <xacro:property name="include_acceleration_command" value="false"/>
+            </xacro:if>
+            <xacro:unless value="${use_mock_hardware}">
+                 <!-- Note: acceleration command interface is ONLY used to set the acceleration limits... -->
+                <xacro:property name="include_acceleration_command" value="true"/>
+            </xacro:unless>
         </xacro:unless>
 
         <xacro:r2c_joints_control_description
@@ -63,32 +88,34 @@
         />
 
         <!-- Virtual GPIOs for Control / Supervision -->
+        <!-- GazeboSimSystem no soporta interfaces GPIO (digitales/analógicas), por lo que
+             los bloques <gpio> se excluyen cuando se usa Gazebo Sim. Esto no afecta al
+             robot real ni al mock hardware. -->
+        <xacro:unless value="${use_gazebo_hardware}">
+            <gpio name="${robot_prefix}supervision">
+                <!-- Integers -->
+                <state_interface name="operation_mode"/>
+                <state_interface name="operation_mode_status"/>
+                <state_interface name="safety_status"/>
+                <state_interface name="control_sequence_delay"/>
+                <!-- Booleans -->
+                <state_interface name="brakes_released"/>
+                <state_interface name="motion_possible"/>
+                <state_interface name="in_motion"/>
+                <state_interface name="in_error"/>
+                <state_interface name="estop_pressed"/>
+                <state_interface name="wait_for_ack"/>
+            </gpio>
 
-
-        <gpio name="${robot_prefix}supervision">
-            <!-- Integers -->
-            <state_interface name="operation_mode"/>
-            <state_interface name="operation_mode_status"/>
-            <state_interface name="safety_status"/>
-            <state_interface name="control_sequence_delay"/>
-            <!-- Booleans -->
-            <state_interface name="brakes_released"/>
-            <state_interface name="motion_possible"/>
-            <state_interface name="in_motion"/>
-            <state_interface name="in_error"/>
-            <state_interface name="estop_pressed"/>
-            <state_interface name="wait_for_ack"/>
-        </gpio>
-
-        <!-- GPIOs -->
-
-        <xacro:r2c_gpios_control_description
-            robot_prefix="${robot_prefix}"
-            num_digital_inputs="${num_digital_inputs}"
-            num_digital_outputs="${num_digital_outputs}"
-            num_analog_inputs="${num_analog_inputs}"
-            num_analog_outputs="${num_analog_outputs}"
-        />
+            <!-- GPIOs -->
+            <xacro:r2c_gpios_control_description
+                robot_prefix="${robot_prefix}"
+                num_digital_inputs="${num_digital_inputs}"
+                num_digital_outputs="${num_digital_outputs}"
+                num_analog_inputs="${num_analog_inputs}"
+                num_analog_outputs="${num_analog_outputs}"
+            />
+        </xacro:unless>
     </ros2_control>
     </xacro:macro>
 </robot>

@@ -70,7 +70,9 @@ private:
     std::atomic<bool> receiving_{false};  // Flag indicating if the receive thread is running
 
     // Asio components
-    boost::asio::io_service io_service_;
+    // Migración Boost 1.90: `boost::asio::io_service` fue eliminado en Boost,
+    // el equivalente moderno es `boost::asio::io_context`.
+    boost::asio::io_context io_context_;
     boost::asio::ip::udp::socket socket_;
     boost::asio::ip::udp::endpoint local_endpoint_, remote_endpoint_;
     boost::asio::ip::udp::endpoint sender_endpoint_;  // filled by async_receive_from
@@ -89,7 +91,7 @@ UDPSocketImpl::UDPSocketImpl()
 : logger_(rclcpp::get_logger("staubli_robot_driver::UDPSocket")),
   is_connected_(false),
   receiving_(false),
-  socket_(io_service_)
+  socket_(io_context_)
 {
     recv_buffer_.resize(MAX_SOCKET_PACKET_SIZE);  // Max UDP packet size
 }
@@ -130,7 +132,9 @@ bool UDPSocketImpl::connect(
             local_addr = boost::asio::ip::address_v4::any();
         } else {
             // Bind to specific interface
-            local_addr = boost::asio::ip::address::from_string(local_address);
+            // Migración Boost 1.90: `address::from_string()` fue eliminado;
+            // el reemplazo moderno es `boost::asio::ip::make_address()`.
+            local_addr = boost::asio::ip::make_address(local_address);
         }
 
         local_endpoint_ = boost::asio::ip::udp::endpoint(local_addr, local_port);
@@ -142,11 +146,22 @@ bool UDPSocketImpl::connect(
         RCLCPP_DEBUG(logger_, "UDP socket bound to local address %s:%d",
                    local_endpoint_.address().to_string().c_str(), local_endpoint_.port());
 
-        // Resolve remote endpoint
-        boost::asio::ip::udp::resolver resolver(io_service_);
-        boost::asio::ip::udp::resolver::query query(
-            boost::asio::ip::udp::v4(), remote_address, std::to_string(remote_port));
-        remote_endpoint_ = *resolver.resolve(query);
+        // Resolve remote endpoint.
+        // Migración Boost 1.90: `udp::resolver::query` y `resolver.resolve(query)`
+        // fueron eliminados, al igual que `operator*()` en los resultados.
+        // Se usa el overload moderno resolve(protocol, host, service, flags),
+        // pasando `address_configured` explícitamente para conservar exactamente
+        // el comportamiento del antiguo query (IPv4 + AI_ADDRCONFIG).
+        boost::asio::ip::udp::resolver resolver(io_context_);
+        boost::asio::ip::udp::resolver::results_type results = resolver.resolve(
+            boost::asio::ip::udp::v4(),
+            remote_address,
+            std::to_string(remote_port),
+            boost::asio::ip::resolver_base::address_configured);
+        // basic_resolver_results ya no expone operator*(); se desreferencia el
+        // primer resultado vía begin(). basic_resolver_entry se convierte
+        // implícitamente a udp::endpoint.
+        remote_endpoint_ = *results.begin();
         RCLCPP_DEBUG(logger_, "UDP socket will send to %s:%d",
                    remote_address.c_str(), remote_port);
     }
@@ -290,14 +305,17 @@ bool UDPSocketImpl::start_receive_thread(
     }
 
     // Setup
-    io_service_.reset();
+    // Migración Boost 1.90: `io_service::reset()` fue eliminado; el equivalente
+    // moderno en `io_context` es `restart()` (permite volver a ejecutar run()
+    // tras un stop() con la misma semántica).
+    io_context_.restart();
     this->start_receive();
 
     // Start the receive thread
     receiving_.store(true);
     receive_thread_ = std::thread([this]() {
         // TODO(tpoignonec): elevate priority of this thread?
-        io_service_.run();
+        io_context_.run();
         RCLCPP_DEBUG(logger_, "ASIO service stopped");
     });
     RCLCPP_DEBUG(logger_, "UDP receive thread started");
@@ -310,7 +328,7 @@ bool UDPSocketImpl::stop_receive_thread() {
         RCLCPP_WARN(logger_, "Cannot stop receive thread: not running.");
         return true;  // Already stopped
     }
-    io_service_.stop();
+    io_context_.stop();
     receive_thread_.join();
     receiving_.store(false);
     RCLCPP_DEBUG(logger_, "UDP receive thread stopped");

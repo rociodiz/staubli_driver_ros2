@@ -21,6 +21,8 @@
 #include <rclcpp/duration.hpp>
 #include <rclcpp/logging.hpp>
 
+#include <thread>
+
 namespace staubli_robot_driver {
 
 RobotDriver::RobotDriver()
@@ -184,7 +186,7 @@ bool RobotDriver::connect(const NetworkConfig& config, int timeout_ms)
         if (!diag_interface_ready) {
             RCLCPP_WARN(logger_, "Diagnostics interface not yet ready");
         }
-        rclcpp::sleep_for(std::chrono::milliseconds(500));
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
     bool interfaces_ready = cmd_interface_ready && diag_interface_ready;
     if (!interfaces_ready) {

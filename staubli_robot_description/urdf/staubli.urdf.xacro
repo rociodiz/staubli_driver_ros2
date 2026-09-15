@@ -38,6 +38,13 @@
     <!-- ROS2 Control parameters -->
     <xacro:arg name="use_mock_hardware" default="true"/>
     <xacro:arg name="mock_sensor_commands" default="false"/>
+    <!-- Path (absolute) to the controllers YAML used by gz_ros2_control.
+         Computed by launch_gazebo.launch.py y pasado como arg. -->
+    <xacro:arg name="gazebo_controllers_file" default=""/>
+    <!-- Gazebo Sim: cuando use_gazebo_hardware:=true, se usa gz_ros2_control
+         en lugar del driver real o mock. Default false para mantener el
+         comportamiento actual sin necesidad de cambiar ningún launch. -->
+    <xacro:arg name="use_gazebo_hardware" default="false"/>
 
     <!-- Toggle absolute / relative mesh paths -->
     <xacro:arg name="force_abs_paths" default="false"/>
@@ -77,6 +84,25 @@
         joint_limits_parameters_file="$(arg joint_limits_parameters_file)"
         initial_positions_file="$(arg initial_positions_file)"
         use_mock_hardware="$(arg use_mock_hardware)"
+        use_gazebo_hardware="$(arg use_gazebo_hardware)"
         mock_sensor_commands="$(arg mock_sensor_commands)"
     />
+
+    <!-- Gazebo Sim plugin de gz_ros2_control.
+         Solo se añade cuando use_gazebo_hardware:=true. El tag <gazebo> es el
+         que soporta sdformat en la conversion URDF→SDF: se convierte en un
+         <plugin> a nivel de <model> en el SDF resultante. El nombre de la
+         clase coincide con la registrada por GZ_ADD_PLUGIN en la libreria
+         gz_ros2_control v3.0.8 (Lyrical). <parameters> es obligatorio: el
+         plugin aborta la inicializacion si esta vacio. -->
+    <xacro:if value="$(arg use_gazebo_hardware)">
+        <gazebo>
+            <plugin
+                filename="libgz_ros2_control-system.so"
+                name="gz_ros2_control::GazeboSimROS2ControlPlugin">
+                <parameters>$(arg gazebo_controllers_file)</parameters>
+                <position_proportional_gain>1.0</position_proportional_gain>
+            </plugin>
+        </gazebo>
+    </xacro:if>
 </robot>

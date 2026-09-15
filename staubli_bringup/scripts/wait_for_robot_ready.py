@@ -43,9 +43,22 @@ class WaitForRoboReady(Node):
             self.get_parameter("joint_states_topic").get_parameter_value().string_value
         )
 
+        # QoS para /robot_description.
+        # TRANSIENT_LOCAL es necesario porque robot_state_publisher publica el
+        # URDF en "latched": así un suscriptor que se une DESPUÉS de la primera
+        # publicación recibe igualmente el mensaje retenido.
         qos_profile = QoSProfile(
             depth=1,
             durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        # QoS para /joint_states.
+        # VOLATILE es el perfil correcto para un flujo continuo como ese:
+        # joint_state_publisher (al igual que el driver real) publica joint_states
+        # con durabilidad VOLATILE, por lo que usar TRANSIENT_LOCAL aquí
+        # provocaría una incompatibilidad de QoS con dichos nodos.
+        joint_states_qos_profile = QoSProfile(
+            depth=1,
+            durability=QoSDurabilityPolicy.VOLATILE,
         )
         self.robot_description_subscription = self.create_subscription(
             String, self.description_topic, self.description_callback, qos_profile=qos_profile
@@ -54,7 +67,7 @@ class WaitForRoboReady(Node):
             JointState,
             self.joint_states_topic,
             self.joint_states_callback,
-            qos_profile=qos_profile,
+            qos_profile=joint_states_qos_profile,
         )
         self.robot_description_future = Future()
         self.joint_states_future = Future()
