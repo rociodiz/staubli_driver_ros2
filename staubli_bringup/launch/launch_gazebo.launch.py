@@ -117,17 +117,22 @@ def generate_launch_description():
         output="both",
     )
 
-    # --- Gazebo Sim server (empty world with ground plane + sun) ---
+    # --- Gazebo Sim server (inspection cell world) ---
     # GzServer action (ros_gz_sim) launches the gzserver node.
     # The gzserver node (ros_gz_sim::GzServer) requires a non-empty
     # world_sdf_file or world_sdf_string: with both empty it aborts with
     # "Must specify either 'world_sdf_file' or 'world_sdf_string'".
-    # This empty.sdf is the vendor default world used by `gz sim` (ground
-    # plane, sun, Physics/UserCommands/SceneBroadcaster/Contact systems).
+    # inspection_cell.sdf contains the ground plane, sun and the static
+    # fixtures of the scene (inspection table + three workpieces). The
+    # robot is spawned separately from /robot_description below.
     # GzServer also sets GZ_SIM_RESOURCE_PATH and GZ_SIM_SYSTEM_PLUGIN_PATH.
 
+    inspection_cell_sdf = PathJoinSubstitution(
+        [FindPackageShare("staubli_bringup"), "worlds", "inspection_cell.sdf"]
+    )
+
     gz_server = GzServer(
-        world_sdf_file="/opt/ros/lyrical/opt/gz_sim_vendor/share/gz/gz-sim/worlds/empty.sdf",
+        world_sdf_file=inspection_cell_sdf,
         create_own_container="False",
         use_composition="False",
     )
@@ -138,6 +143,8 @@ def generate_launch_description():
     # service. gz-sim converts URDF→SDF via sdformat internally. The
     # <gazebo><plugin> block survives the conversion as a model-level
     # <plugin>, so gz_ros2_control loads and creates the controller_manager.
+    # Spawned at X=0, Y=0, Z=0.30 to sit on top of the robot_platform box
+    # (0.30 m tall) in inspection_cell.sdf.
 
     spawn_robot = Node(
         package="ros_gz_sim",
@@ -145,6 +152,7 @@ def generate_launch_description():
         arguments=[
             "-topic", "/robot_description",
             "-name", "staubli",
+            "-z", "0.30",
             "-allow_renaming", "true",
         ],
         output="screen",
