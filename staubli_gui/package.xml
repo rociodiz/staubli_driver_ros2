@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>staubli_gui</name>
+  <version>0.0.1</version>
+  <description>
+    Interfaz gráfica de control del robot Staubli TX2-60L basada en PySide6.
+    Fase 1: solo presentación visual (sin conexión ROS).
+  </description>
+  <maintainer email="rocio@example.com">rocio</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>buildtool_ament_python</buildtool_depend>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>python3-pyside6.qtcore</exec_depend>
+  <exec_depend>python3-pyside6.qtgui</exec_depend>
+  <exec_depend>python3-pyside6.qtwidgets</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
