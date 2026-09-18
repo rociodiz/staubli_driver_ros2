@@ -14,6 +14,9 @@
 
   <exec_depend>rclpy</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>controller_manager_msgs</exec_depend>
+  <exec_depend>control_msgs</exec_depend>
+  <exec_depend>trajectory_msgs</exec_depend>
   <exec_depend>python3-pyside6.qtcore</exec_depend>
   <exec_depend>python3-pyside6.qtgui</exec_depend>
   <exec_depend>python3-pyside6.qtwidgets</exec_depend>

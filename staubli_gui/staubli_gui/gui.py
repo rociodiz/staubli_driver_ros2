@@ -1,18 +1,30 @@
 """Ventana principal de la GUI del Staubli TX2-60L.
 
-Integración ROS 2 (fase 1, solo lectura): el nodo se suscribe a
-/joint_states (sensor_msgs/msg/JointState) con QoS RELIABLE +
-TRANSIENT_LOCAL + KEEP_LAST(1) y muestra en tiempo real las posiciones
-joint_1..joint_6 -> J1..J6 (radianes, 4 decimales). El bucle ROS se
-integra con el ciclo de eventos de Qt mediante un QTimer que ejecuta
-rclpy.spin_once(...) periódicamente. Sin conexión con actions/services:
-ENABLE, DISABLE, HOME, P1-P3, EJECUTAR TRAYECTORIA y STOP siguen siendo
-placeholders.
+Integración ROS 2:
+  1. Suscripción a /joint_states (sensor_msgs/msg/JointState) con QoS
+     RELIABLE + TRANSIENT_LOCAL + KEEP_LAST(1) para mostrar en tiempo real
+     las posiciones joint_1..joint_6 -> J1..J6 (radianes, 4 decimales).
+  2. Servicio /controller_manager/list_controllers (~1 s) para el indicador
+     de estado: "HABILITADO" si joint_trajectory_controller está 'active',
+     "DESHABILITADO" en caso contrario.
+  3. Acción /joint_trajectory_controller/follow_joint_trajectory (HOME):
+     envía el robot a posición articular [0.0]*6 usando la misma lógica de
+     goal (FollowJointTrajectory + JointTolerance) que staubli_trajectory,
+     pero de forma asíncrona para no bloquear la GUI.
+
+El bucle ROS se integra con el ciclo de eventos de Qt mediante un QTimer
+que ejecuta rclpy.spin_once(...) periódicamente. ENABLE, DISABLE, P1-P3,
+EJECUTAR TRAYECTORIA y STOP siguen siendo placeholders.
 """
 
 import sys
 
 import rclpy
+from control_msgs.action import FollowJointTrajectory
+from control_msgs.msg import JointTolerance
+from controller_manager_msgs.srv import ListControllers, SwitchController
+from rclpy.action import ActionClient
+from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import (
     DurabilityPolicy,
@@ -21,6 +33,7 @@ from rclpy.qos import (
     ReliabilityPolicy,
 )
 from sensor_msgs.msg import JointState
+from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
@@ -74,6 +87,45 @@ _JOINT_STATES_QOS = QoSProfile(
 
 # Frecuencia del QTimer que integra el bucle ROS con Qt (spin_once).
 _ROS_SPIN_MS = 33  # ~30 Hz (no bloquea la GUI)
+
+# ─── ROS 2 (fase 2: indicador de estado HABILITADO/DESHABILITADO) ─────
+# Consulta periódica del estado del joint_trajectory_controller mediante
+# el servicio /controller_manager/list_controllers (~1 s).
+_LIST_CONTROLLERS_SERVICE = "/controller_manager/list_controllers"
+_LIST_CONTROLLERS_SRV = ListControllers
+_JTC_CONTROLLER_NAME = "joint_trajectory_controller"
+_STATUS_POLL_MS = 1000  # ~1 Hz (indicador de estado)
+
+# ── ENABLE / DISABLE (servicio switch_controller, asíncrono) ──────────
+# Activa/desactiva joint_trajectory_controller. BEST_EFFORT evita error si
+# el controller ya está en el estado pedido.
+_SWITCH_CONTROLLER_SERVICE = "/controller_manager/switch_controller"
+_SWITCH_CONTROLLER_SRV = SwitchController
+_SWITCH_STRICTNESS = SwitchController.Request.BEST_EFFORT
+_SWITCH_TIMEOUT_S = 5.0
+
+# ── HOME (acción FollowJointTrajectory, misma lógica que staubli_trajectory) ──
+_HOME_ACTION = "/joint_trajectory_controller/follow_joint_trajectory"
+_HOME_MSG = FollowJointTrajectory
+_HOME_JOINT_NAMES = [f"joint_{i}" for i in range(1, 7)]
+_HOME_POSITIONS = [0.0] * 6
+_HOME_DURATION_S = 10.0  # tiempo de viaje programado a la cero
+# Tolerancias del goal (igual que staubli_trajectory/config/points.yaml).
+_HOME_GOAL_TOL_POS = 0.01
+_HOME_GOAL_TOL_VEL = 0.05
+_HOME_GOAL_TOL_ACC = 0.1
+_HOME_GOAL_TIME_TOL_S = 2.5
+_HOME_STATUS_HOLD_MS = 2500  # mantener "HOME COMPLETADO" antes de volver al indicador
+# Códigos de resultado del FollowJointTrajectoryResult (misma semántica que
+# joint_trajectory_client._RESULT_CODES en staubli_trajectory).
+_HOME_RESULT_CODES = {
+    _HOME_MSG.Result.SUCCESSFUL: "SUCCESSFUL",
+    _HOME_MSG.Result.INVALID_GOAL: "INVALID_GOAL",
+    _HOME_MSG.Result.INVALID_JOINTS: "INVALID_JOINTS",
+    _HOME_MSG.Result.OLD_HEADER_TIMESTAMP: "OLD_HEADER_TIMESTAMP",
+    _HOME_MSG.Result.PATH_TOLERANCE_VIOLATED: "PATH_TOLERANCE_VIOLATED",
+    _HOME_MSG.Result.GOAL_TOLERANCE_VIOLATED: "GOAL_TOLERANCE_VIOLATED",
+}
 
 
 def _stylesheet() -> str:
@@ -181,6 +233,13 @@ class MainWindow(QMainWindow):
         self._ros_node = ros_node
         self._ros_timer: QTimer | None = None
         self._joint_states_sub = None
+        self._list_controllers_client = None
+        self._status_timer: QTimer | None = None
+        self._switch_controller_client = None
+        self._switch_pending = False
+        self._home_client: ActionClient | None = None
+        self._home_goal_handle = None
+        self._home_active = False
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -328,9 +387,9 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(min_w, min_h)
         self.resize(min_w, min_h)
 
-    # ── ROS 2: suscripción a /joint_states ─────────────────────────────
+    # ── ROS 2: suscripción a /joint_states + estado del controller ────
     def _setup_ros(self) -> None:
-        """Crea la suscripción y el QTimer que integra el spin con Qt."""
+        """Crea la suscripción, el client de list_controllers y los QTimers."""
         self._joint_states_sub = self._ros_node.create_subscription(
             _JOINT_STATES_MSG,
             _JOINT_STATES_TOPIC,
@@ -343,6 +402,26 @@ class MainWindow(QMainWindow):
         self._ros_timer.start()
         self._ros_node.get_logger().info(
             f"Suscrito a {_JOINT_STATES_TOPIC} ({_JOINT_STATES_MSG.__name__})."
+        )
+
+        # Estado del joint_trajectory_controller (list_controllers).
+        self._list_controllers_client = self._ros_node.create_client(
+            _LIST_CONTROLLERS_SRV, _LIST_CONTROLLERS_SERVICE
+        )
+        self._status_timer = QTimer(self)
+        self._status_timer.setInterval(_STATUS_POLL_MS)
+        self._status_timer.timeout.connect(self._poll_controller_status)
+        self._status_timer.start()
+        self._poll_controller_status()  # consulta inmediata inicial
+
+        # HOME: action client del joint_trajectory_controller (async, no bloquea).
+        self._home_client = ActionClient(
+            self._ros_node, _HOME_MSG, _HOME_ACTION
+        )
+
+        # ENABLE / DISABLE: client del servicio switch_controller.
+        self._switch_controller_client = self._ros_node.create_client(
+            _SWITCH_CONTROLLER_SRV, _SWITCH_CONTROLLER_SERVICE
         )
 
     def _spin_once(self) -> None:
@@ -360,11 +439,51 @@ class MainWindow(QMainWindow):
             if ros_name in positions:
                 self._joint_labels[gui_key].setText(f"{positions[ros_name]:.4f}")
 
+    # ── ROS 2: estado del joint_trajectory_controller ─────────────────
+    def _poll_controller_status(self) -> None:
+        """Lanza una consulta asíncrona a /controller_manager/list_controllers."""
+        if self._list_controllers_client is None or not rclpy.ok():
+            return
+        if not self._list_controllers_client.service_is_ready():
+            return
+        try:
+            future = self._list_controllers_client.call_async(
+                _LIST_CONTROLLERS_SRV.Request()
+            )
+            future.add_done_callback(self._on_controller_status_response)
+        except Exception as exc:  # noqa: BLE001 - no romper la GUI
+            print(f"[GUI] error consultando estado del controller: {exc}")
+
+    def _on_controller_status_response(self, future) -> None:
+        """Actualiza el indicador según el estado de joint_trajectory_controller."""
+        try:
+            response = future.result()
+        except Exception as exc:  # noqa: BLE001 - no romper la GUI
+            print(f"[GUI] fallo en list_controllers: {exc}")
+            return
+        estado = None
+        for ctrl in response.controller:
+            if ctrl.name == _JTC_CONTROLLER_NAME:
+                estado = ctrl.state
+                break
+        if estado == "active":
+            self._set_status("● HABILITADO", _VERDE)
+        else:
+            self._set_status("● DESHABILITADO", _ROJO)
+
     def closeEvent(self, event):  # noqa: N802 - firma de Qt
-        """Detiene el spin ROS y evita callbacks tras cerrar la ventana."""
+        """Detiene los timers ROS y evita callbacks tras cerrar la ventana."""
+        if self._home_active and self._home_goal_handle is not None:
+            try:
+                self._home_goal_handle.cancel_goal_async()
+            except Exception:  # noqa: BLE001 - no romper el cierre
+                pass
         if self._ros_timer is not None:
             self._ros_timer.stop()
             self._ros_timer = None
+        if self._status_timer is not None:
+            self._status_timer.stop()
+            self._status_timer = None
         super().closeEvent(event)
 
     # ── Callbacks placeholder (sin ROS) ───────────────────────────────
@@ -372,16 +491,220 @@ class MainWindow(QMainWindow):
         self._status_label.setText(text)
         self._status_label.setStyleSheet(_label_style(color, _FAMILIA, 15))
 
+    # ── ENABLE / DISABLE (switch_controller, asíncrono) ───────────────
     def _on_enable(self):
-        self._set_status("● HABILITADO", _VERDE)
-        print("[GUI] ENABLE presionado")
+        self._switch_controller(activate=True)
 
     def _on_disable(self):
-        self._set_status("● DESHABILITADO", _ROJO)
-        print("[GUI] DISABLE presionado")
+        self._switch_controller(activate=False)
+
+    def _switch_controller(self, activate: bool) -> None:
+        """Activa/desactiva joint_trajectory_controller sin bloquear la GUI."""
+        if self._ros_node is None or self._switch_controller_client is None:
+            print("[GUI] switch_controller sin ROS (placeholder)")
+            return
+        if self._switch_pending:
+            return
+        if not self._switch_controller_client.service_is_ready():
+            self._set_status("● CONTROLLER: SERVICIO NO DISPONIBLE", _ROJO)
+            self._ros_node.get_logger().error(
+                f"{_SWITCH_CONTROLLER_SERVICE} no disponible."
+            )
+            return
+
+        request = _SWITCH_CONTROLLER_SRV.Request()
+        if activate:
+            request.activate_controllers = [_JTC_CONTROLLER_NAME]
+        else:
+            request.deactivate_controllers = [_JTC_CONTROLLER_NAME]
+        request.strictness = _SWITCH_STRICTNESS
+        request.activate_asap = False
+        request.timeout = Duration(seconds=_SWITCH_TIMEOUT_S).to_msg()
+
+        accion = "ENABLE" if activate else "DISABLE"
+        self._switch_pending = True
+        self.btn_enable.setEnabled(False)
+        self.btn_disable.setEnabled(False)
+        self._set_status(
+            f"● {accion}: {'ACTIVANDO' if activate else 'DESACTIVANDO'}...", _AZUL
+        )
+        self._ros_node.get_logger().info(
+            f"{accion}: switch_controller "
+            f"{'activate' if activate else 'deactivate'} {_JTC_CONTROLLER_NAME}..."
+        )
+        try:
+            future = self._switch_controller_client.call_async(request)
+            future.add_done_callback(
+                lambda fut: self._on_switch_controller_response(fut, accion)
+            )
+        except Exception as exc:  # noqa: BLE001 - no romper la GUI
+            self._finish_switch(accion, False, str(exc))
+
+    def _on_switch_controller_response(self, future, accion: str) -> None:
+        """Respuesta del switch_controller: ok + mensaje de error si falla."""
+        try:
+            response = future.result()
+        except Exception as exc:  # noqa: BLE001 - no romper la GUI
+            self._finish_switch(accion, False, str(exc))
+            return
+        self._finish_switch(accion, bool(response.ok), response.message)
+
+    def _finish_switch(self, accion: str, ok: bool, message: str) -> None:
+        """Restaura botones y refleja el resultado de ENABLE/DISABLE."""
+        self._switch_pending = False
+        self.btn_enable.setEnabled(True)
+        self.btn_disable.setEnabled(True)
+        if self._ros_node is not None:
+            logger = self._ros_node.get_logger()
+            (logger.info if ok else logger.error)(
+                f"{accion}: {'OK' if ok else 'FALLÓ'} ({message})"
+            )
+        if ok:
+            if accion == "ENABLE":
+                self._set_status("● HABILITADO", _VERDE)
+            else:
+                self._set_status("● DESHABILITADO", _ROJO)
+            self._poll_controller_status()  # confirmar con el estado real
+        else:
+            self._set_status(f"● {accion} FALLÓ: {message}", _ROJO)
 
     def _on_home(self):
-        print("[GUI] HOME presionado")
+        """Envía el robot a la posición cero (HOME) sin bloquear la GUI."""
+        if self._home_active:
+            return
+        if self._home_client is None or self._list_controllers_client is None:
+            print("[GUI] HOME presionado (sin ROS: placeholder)")
+            return
+
+        self._home_active = True
+        self.btn_home.setEnabled(False)  # evita goals simultáneos
+        self._pause_status_poll()
+        self._set_status("● HOME: COMPROBANDO CONTROLLER...", _AZUL)
+
+        # Antes de enviar: exigir joint_trajectory_controller 'active'.
+        if not self._list_controllers_client.service_is_ready():
+            self._finish_home(
+                "● HOME: NO SE PUEDE VERIFICAR EL CONTROLLER", _ROJO
+            )
+            return
+        try:
+            future = self._list_controllers_client.call_async(
+                _LIST_CONTROLLERS_SRV.Request()
+            )
+            future.add_done_callback(self._on_home_controller_check)
+        except Exception as exc:  # noqa: BLE001 - no romper la GUI
+            self._finish_home(f"● HOME: ERROR AL VERIFICAR ({exc})", _ROJO)
+
+    def _on_home_controller_check(self, future) -> None:
+        """Solo envía el goal si joint_trajectory_controller está 'active'."""
+        try:
+            response = future.result()
+        except Exception as exc:  # noqa: BLE001 - no romper la GUI
+            self._finish_home(f"● HOME: ERROR AL VERIFICAR ({exc})", _ROJO)
+            return
+
+        estado = None
+        for ctrl in response.controller:
+            if ctrl.name == _JTC_CONTROLLER_NAME:
+                estado = ctrl.state
+                break
+        if estado != "active":
+            self._finish_home(
+                f"● HOME: CONTROLLER {estado or 'NO ENCONTRADO'} (se requiere active)",
+                _ROJO,
+            )
+            return
+
+        if not self._home_client.server_is_ready():
+            self._finish_home("● HOME: ACTION SERVER NO DISPONIBLE", _ROJO)
+            return
+
+        self._set_status("MOVIENDO A HOME...", _AZUL)
+        goal = self._build_home_goal()
+        self._ros_node.get_logger().info(
+            f"HOME: enviando goal a posición cero {_HOME_POSITIONS}."
+        )
+        goal_future = self._home_client.send_goal_async(goal)
+        goal_future.add_done_callback(self._on_home_goal_response)
+
+    # ── HOME: construcción del goal y seguimiento asíncrono ───────────
+    def _build_home_goal(self) -> FollowJointTrajectory.Goal:
+        """Goal HOME: trayectoria + tolerancias (igual que staubli_trajectory)."""
+        point = JointTrajectoryPoint()
+        point.positions = [float(v) for v in _HOME_POSITIONS]
+        point.time_from_start = Duration(seconds=_HOME_DURATION_S).to_msg()
+
+        trajectory = JointTrajectory()
+        trajectory.joint_names = list(_HOME_JOINT_NAMES)
+        trajectory.points = [point]
+
+        goal = FollowJointTrajectory.Goal()
+        goal.trajectory = trajectory
+        for name in _HOME_JOINT_NAMES:
+            tol = JointTolerance()
+            tol.name = name
+            tol.position = _HOME_GOAL_TOL_POS
+            tol.velocity = _HOME_GOAL_TOL_VEL
+            tol.acceleration = _HOME_GOAL_TOL_ACC
+            goal.goal_tolerance.append(tol)
+        goal.goal_time_tolerance = Duration(
+            seconds=_HOME_GOAL_TIME_TOL_S
+        ).to_msg()
+        return goal
+
+    def _on_home_goal_response(self, future) -> None:
+        """El controller acepta/rechaza el goal; espera el resultado real."""
+        try:
+            goal_handle = future.result()
+        except Exception as exc:  # noqa: BLE001 - no romper la GUI
+            self._finish_home(f"● HOME: ERROR AL ENVIAR ({exc})", _ROJO)
+            return
+        if not goal_handle.accepted:
+            self._finish_home("● HOME: GOAL RECHAZADO", _ROJO)
+            return
+
+        self._home_goal_handle = goal_handle
+        self._ros_node.get_logger().info(
+            "HOME: goal ACEPTADO; esperando resultado de ejecución."
+        )
+        result_future = goal_handle.get_result_async()
+        result_future.add_done_callback(self._on_home_result)
+
+    def _on_home_result(self, future) -> None:
+        """Comprueba el estado final del goal (no basta con haberlo enviado)."""
+        try:
+            wrapped = future.result()
+            error_code = getattr(wrapped.result, "error_code", None)
+        except Exception as exc:  # noqa: BLE001 - no romper la GUI
+            self._finish_home(f"● HOME: ERROR ({exc})", _ROJO)
+            return
+
+        if error_code == _HOME_MSG.Result.SUCCESSFUL:
+            self._finish_home("● HOME COMPLETADO", _VERDE)
+        else:
+            nombre = _HOME_RESULT_CODES.get(
+                error_code, f"desconocido ({error_code})"
+            )
+            self._finish_home(f"● HOME FALLÓ: {nombre}", _ROJO)
+
+    def _finish_home(self, status_text: str, color: str) -> None:
+        """Restaura botón y sondeo de estado al terminar (o fallar) HOME."""
+        self._home_active = False
+        self._home_goal_handle = None
+        self.btn_home.setEnabled(True)
+        self._set_status(status_text, color)
+        QTimer.singleShot(_HOME_STATUS_HOLD_MS, self._resume_status_poll)
+
+    def _pause_status_poll(self) -> None:
+        """Evita que el indicador (1 Hz) pise el estado de HOME en curso."""
+        if self._status_timer is not None:
+            self._status_timer.stop()
+
+    def _resume_status_poll(self) -> None:
+        """Reanuda el indicador (salvo que haya otro HOME en curso)."""
+        if self._status_timer is not None and not self._home_active:
+            self._status_timer.start()
+            self._poll_controller_status()
 
     def _on_punto(self, name: str):
         print(f"[GUI] {name} presionado")
