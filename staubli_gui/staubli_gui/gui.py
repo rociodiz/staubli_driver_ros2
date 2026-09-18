@@ -7,10 +7,12 @@ Integración ROS 2:
   2. Servicio /controller_manager/list_controllers (~1 s) para el indicador
      de estado: "HABILITADO" si joint_trajectory_controller está 'active',
      "DESHABILITADO" en caso contrario.
-  3. Acción /joint_trajectory_controller/follow_joint_trajectory (HOME):
-     envía el robot a posición articular [0.0]*6 usando la misma lógica de
-     goal (FollowJointTrajectory + JointTolerance) que staubli_trajectory,
-     pero de forma asíncrona para no bloquear la GUI.
+  3. Acción /joint_trajectory_controller/follow_joint_trajectory (HOME y
+     P1-P3): envía goals de un solo waypoint (posición articular) usando la
+     misma lógica de goal (FollowJointTrajectory + JointTolerance) que
+     staubli_trajectory, pero de forma asíncrona para no bloquear la GUI.
+     Las IK de P1/P2/P3 se reutilizan de staubli_trajectory (points.yaml +
+     TrajectoryBuilder); no se duplican coordenadas ni IK aquí.
 
 El bucle ROS se integra con el ciclo de eventos de Qt mediante un QTimer
 que ejecuta rclpy.spin_once(...) periódicamente. ENABLE, DISABLE, P1-P3,
@@ -127,6 +129,20 @@ _HOME_RESULT_CODES = {
     _HOME_MSG.Result.GOAL_TOLERANCE_VIOLATED: "GOAL_TOLERANCE_VIOLATED",
 }
 
+# ── P1/P2/P3 (waypoints individuales; IK reutilizada de staubli_trajectory) ──
+# points.yaml sigue siendo la única fuente de verdad: la GUI solo lee las
+# posiciones articulares ya resueltas por TrajectoryBuilder (sin IK propia).
+_POINTS_PKG = "staubli_trajectory"  # paquete propietario de config/points.yaml
+_POINTS_RELATIVE_CONFIG = ("config", "points.yaml")
+_POINT_DURATION_S = 10.0  # duración de cada waypoint P1/P2/P3 (configurable)
+_POINT_BTN_ATTR = {"P1": "btn_p1", "P2": "btn_p2", "P3": "btn_p3"}
+# Nombre del waypoint en points.yaml al que corresponde cada botón P.
+_POINT_WAYPOINT_NAMES = {
+    "P1": "inspection_fronto_superior",
+    "P2": "inspection_izquierda",
+    "P3": "inspection_derecha",
+}
+
 
 def _stylesheet() -> str:
     """Estilos de contenedores (ventana, group boxes, títulos).
@@ -237,9 +253,13 @@ class MainWindow(QMainWindow):
         self._status_timer: QTimer | None = None
         self._switch_controller_client = None
         self._switch_pending = False
-        self._home_client: ActionClient | None = None
-        self._home_goal_handle = None
-        self._home_active = False
+        self._action_client: ActionClient | None = None
+        self._motion_goal_handle = None
+        self._motion_active = False  # exclusividad HOME + P1-P3
+        self._motion_button = None
+        self._point_plan = None
+        self._point_qs: dict = {}
+        self._point_ready = False
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -414,10 +434,13 @@ class MainWindow(QMainWindow):
         self._status_timer.start()
         self._poll_controller_status()  # consulta inmediata inicial
 
-        # HOME: action client del joint_trajectory_controller (async, no bloquea).
-        self._home_client = ActionClient(
+        # Acción del joint_trajectory_controller (HOME y P1-P3; async, no bloquea).
+        self._action_client = ActionClient(
             self._ros_node, _HOME_MSG, _HOME_ACTION
         )
+
+        # IK/config de points.yaml -> posiciones articulares de P1/P2/P3.
+        self._load_point_plan()
 
         # ENABLE / DISABLE: client del servicio switch_controller.
         self._switch_controller_client = self._ros_node.create_client(
@@ -473,9 +496,9 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):  # noqa: N802 - firma de Qt
         """Detiene los timers ROS y evita callbacks tras cerrar la ventana."""
-        if self._home_active and self._home_goal_handle is not None:
+        if self._motion_active and self._motion_goal_handle is not None:
             try:
-                self._home_goal_handle.cancel_goal_async()
+                self._motion_goal_handle.cancel_goal_async()
             except Exception:  # noqa: BLE001 - no romper el cierre
                 pass
         if self._ros_timer is not None:
@@ -568,39 +591,133 @@ class MainWindow(QMainWindow):
         else:
             self._set_status(f"● {accion} FALLÓ: {message}", _ROJO)
 
+    # ── Movimiento HOME + P1-P3 (Goal único, asíncrono, común) ─────────
     def _on_home(self):
         """Envía el robot a la posición cero (HOME) sin bloquear la GUI."""
-        if self._home_active:
+        if self._motion_active:
             return
-        if self._home_client is None or self._list_controllers_client is None:
+        if (
+            self._ros_node is None
+            or self._action_client is None
+            or self._list_controllers_client is None
+        ):
             print("[GUI] HOME presionado (sin ROS: placeholder)")
             return
 
-        self._home_active = True
-        self.btn_home.setEnabled(False)  # evita goals simultáneos
+        goal = self._build_single_goal(_HOME_POSITIONS, _HOME_DURATION_S)
+        self._run_single_goal(
+            goal=goal,
+            button=self.btn_home,
+            moving_text="MOVIENDO A HOME...",
+            ok_text="HOME COMPLETADO",
+            tag="HOME",
+        )
+
+    def _on_punto(self, name: str):
+        """Envía un único waypoint P1/P2/P3 (IK ya resuelta en el arranque)."""
+        if self._motion_active:
+            return
+        if self._ros_node is None or self._action_client is None:
+            print(f"[GUI] {name} presionado (sin ROS: placeholder)")
+            return
+        if not self._point_ready:
+            self._set_status(
+                f"● {name}: NO DISPONIBLE (carga de trayectoria fallida)", _ROJO
+            )
+            return
+
+        wp_name = _POINT_WAYPOINT_NAMES.get(name)
+        btn = getattr(self, _POINT_BTN_ATTR.get(name, ""), None)
+        if wp_name is None or btn is None:
+            return
+        q = self._point_qs.get(wp_name)
+        if q is None:
+            self._set_status(
+                f"● {name}: waypoint '{wp_name}' NO ENCONTRADO en points.yaml", _ROJO
+            )
+            self._ros_node.get_logger().error(
+                f"{name}: waypoint '{wp_name}' no existe en points.yaml."
+            )
+            return
+
+        goal = self._build_single_goal(q, _POINT_DURATION_S)
+        self._run_single_goal(
+            goal=goal,
+            button=btn,
+            moving_text=f"MOVIENDO A {name}...",
+            ok_text=f"{name} ALCANZADO",
+            tag=name,
+        )
+
+    def _run_single_goal(
+        self,
+        *,
+        goal: FollowJointTrajectory.Goal,
+        button,
+        moving_text: str,
+        ok_text: str,
+        tag: str,
+    ) -> None:
+        """Envío común HOME/P1-P3: comprueba el controller, envía y sigue.
+
+        Comparte el flujo asíncrono (controller 'active' -> send_goal_async
+        -> aceptado -> get_result_async -> resultado real) y garantiza que
+        solo haya un movimiento en curso a la vez (_motion_active).
+        """
+        if self._motion_active:
+            return
+        if (
+            self._ros_node is None
+            or self._action_client is None
+            or self._list_controllers_client is None
+        ):
+            print(f"[GUI] {tag} sin ROS (placeholder)")
+            return
+
+        self._motion_active = True
+        self._motion_button = button
+        button.setEnabled(False)  # evita goals simultáneos
         self._pause_status_poll()
-        self._set_status("● HOME: COMPROBANDO CONTROLLER...", _AZUL)
+        self._set_status(f"● {tag}: COMPROBANDO CONTROLLER...", _AZUL)
 
         # Antes de enviar: exigir joint_trajectory_controller 'active'.
         if not self._list_controllers_client.service_is_ready():
-            self._finish_home(
-                "● HOME: NO SE PUEDE VERIFICAR EL CONTROLLER", _ROJO
+            self._finish_motion(
+                f"● {tag}: NO SE PUEDE VERIFICAR EL CONTROLLER", _ROJO
             )
             return
         try:
             future = self._list_controllers_client.call_async(
                 _LIST_CONTROLLERS_SRV.Request()
             )
-            future.add_done_callback(self._on_home_controller_check)
+            future.add_done_callback(
+                lambda fut: self._on_motion_controller_check(
+                    fut,
+                    goal=goal,
+                    button=button,
+                    moving_text=moving_text,
+                    ok_text=ok_text,
+                    tag=tag,
+                )
+            )
         except Exception as exc:  # noqa: BLE001 - no romper la GUI
-            self._finish_home(f"● HOME: ERROR AL VERIFICAR ({exc})", _ROJO)
+            self._finish_motion(f"● {tag}: ERROR AL VERIFICAR ({exc})", _ROJO)
 
-    def _on_home_controller_check(self, future) -> None:
+    def _on_motion_controller_check(
+        self,
+        future,
+        *,
+        goal: FollowJointTrajectory.Goal,
+        button,
+        moving_text: str,
+        ok_text: str,
+        tag: str,
+    ) -> None:
         """Solo envía el goal si joint_trajectory_controller está 'active'."""
         try:
             response = future.result()
         except Exception as exc:  # noqa: BLE001 - no romper la GUI
-            self._finish_home(f"● HOME: ERROR AL VERIFICAR ({exc})", _ROJO)
+            self._finish_motion(f"● {tag}: ERROR AL VERIFICAR ({exc})", _ROJO)
             return
 
         estado = None
@@ -609,30 +726,36 @@ class MainWindow(QMainWindow):
                 estado = ctrl.state
                 break
         if estado != "active":
-            self._finish_home(
-                f"● HOME: CONTROLLER {estado or 'NO ENCONTRADO'} (se requiere active)",
+            self._finish_motion(
+                f"● {tag}: CONTROLLER {estado or 'NO ENCONTRADO'} (se requiere active)",
                 _ROJO,
             )
             return
 
-        if not self._home_client.server_is_ready():
-            self._finish_home("● HOME: ACTION SERVER NO DISPONIBLE", _ROJO)
+        if not self._action_client.server_is_ready():
+            self._finish_motion(f"● {tag}: ACTION SERVER NO DISPONIBLE", _ROJO)
             return
 
-        self._set_status("MOVIENDO A HOME...", _AZUL)
-        goal = self._build_home_goal()
+        self._set_status(moving_text, _AZUL)
         self._ros_node.get_logger().info(
-            f"HOME: enviando goal a posición cero {_HOME_POSITIONS}."
+            f"{tag}: enviando goal a "
+            f"{[float(v) for v in goal.trajectory.points[0].positions]}."
         )
-        goal_future = self._home_client.send_goal_async(goal)
-        goal_future.add_done_callback(self._on_home_goal_response)
+        goal_future = self._action_client.send_goal_async(goal)
+        goal_future.add_done_callback(
+            lambda fut: self._on_motion_goal_response(
+                fut, button=button, ok_text=ok_text, tag=tag
+            )
+        )
 
-    # ── HOME: construcción del goal y seguimiento asíncrono ───────────
-    def _build_home_goal(self) -> FollowJointTrajectory.Goal:
-        """Goal HOME: trayectoria + tolerancias (igual que staubli_trajectory)."""
+    # ── Construcción del goal y seguimiento asíncrono ─────────────────
+    def _build_single_goal(
+        self, positions, duration_s: float
+    ) -> FollowJointTrajectory.Goal:
+        """Goal de un solo waypoint: trayectoria + tolerancias (igual que antes)."""
         point = JointTrajectoryPoint()
-        point.positions = [float(v) for v in _HOME_POSITIONS]
-        point.time_from_start = Duration(seconds=_HOME_DURATION_S).to_msg()
+        point.positions = [float(v) for v in positions]
+        point.time_from_start = Duration(seconds=duration_s).to_msg()
 
         trajectory = JointTrajectory()
         trajectory.joint_names = list(_HOME_JOINT_NAMES)
@@ -652,62 +775,115 @@ class MainWindow(QMainWindow):
         ).to_msg()
         return goal
 
-    def _on_home_goal_response(self, future) -> None:
+    def _on_motion_goal_response(self, future, *, button, ok_text: str, tag: str):
         """El controller acepta/rechaza el goal; espera el resultado real."""
         try:
             goal_handle = future.result()
         except Exception as exc:  # noqa: BLE001 - no romper la GUI
-            self._finish_home(f"● HOME: ERROR AL ENVIAR ({exc})", _ROJO)
+            self._finish_motion(f"● {tag}: ERROR AL ENVIAR ({exc})", _ROJO)
             return
         if not goal_handle.accepted:
-            self._finish_home("● HOME: GOAL RECHAZADO", _ROJO)
+            self._finish_motion(f"● {tag}: GOAL RECHAZADO", _ROJO)
             return
 
-        self._home_goal_handle = goal_handle
+        self._motion_goal_handle = goal_handle
         self._ros_node.get_logger().info(
-            "HOME: goal ACEPTADO; esperando resultado de ejecución."
+            f"{tag}: goal ACEPTADO; esperando resultado de ejecución."
         )
         result_future = goal_handle.get_result_async()
-        result_future.add_done_callback(self._on_home_result)
+        result_future.add_done_callback(
+            lambda fut: self._on_motion_result(fut, ok_text=ok_text, tag=tag)
+        )
 
-    def _on_home_result(self, future) -> None:
+    def _on_motion_result(self, future, *, ok_text: str, tag: str) -> None:
         """Comprueba el estado final del goal (no basta con haberlo enviado)."""
         try:
             wrapped = future.result()
             error_code = getattr(wrapped.result, "error_code", None)
         except Exception as exc:  # noqa: BLE001 - no romper la GUI
-            self._finish_home(f"● HOME: ERROR ({exc})", _ROJO)
+            self._finish_motion(f"● {tag}: ERROR ({exc})", _ROJO)
             return
 
         if error_code == _HOME_MSG.Result.SUCCESSFUL:
-            self._finish_home("● HOME COMPLETADO", _VERDE)
+            self._finish_motion(f"● {ok_text}", _VERDE)
         else:
             nombre = _HOME_RESULT_CODES.get(
                 error_code, f"desconocido ({error_code})"
             )
-            self._finish_home(f"● HOME FALLÓ: {nombre}", _ROJO)
+            self._finish_motion(f"● {tag} FALLÓ: {nombre}", _ROJO)
 
-    def _finish_home(self, status_text: str, color: str) -> None:
-        """Restaura botón y sondeo de estado al terminar (o fallar) HOME."""
-        self._home_active = False
-        self._home_goal_handle = None
-        self.btn_home.setEnabled(True)
+    def _finish_motion(self, status_text: str, color: str) -> None:
+        """Restaura botón y sondeo de estado al terminar (o fallar) un goal."""
+        self._motion_active = False
+        self._motion_goal_handle = None
+        if self._motion_button is not None:
+            self._motion_button.setEnabled(True)
+            self._motion_button = None
         self._set_status(status_text, color)
         QTimer.singleShot(_HOME_STATUS_HOLD_MS, self._resume_status_poll)
 
     def _pause_status_poll(self) -> None:
-        """Evita que el indicador (1 Hz) pise el estado de HOME en curso."""
+        """Evita que el indicador (1 Hz) pise el estado del movimiento en curso."""
         if self._status_timer is not None:
             self._status_timer.stop()
 
     def _resume_status_poll(self) -> None:
-        """Reanuda el indicador (salvo que haya otro HOME en curso)."""
-        if self._status_timer is not None and not self._home_active:
+        """Reanuda el indicador (salvo que haya otro movimiento en curso)."""
+        if self._status_timer is not None and not self._motion_active:
             self._status_timer.start()
             self._poll_controller_status()
 
-    def _on_punto(self, name: str):
-        print(f"[GUI] {name} presionado")
+    # ── P1/P2/P3: carga única de points.yaml + IK (sin duplicar) ──────
+    def _load_point_plan(self) -> None:
+        """Resuelve las IK de points.yaml con staubli_trajectory.
+
+        Si la carga o la IK fallan, la GUI NO se cierra: P1-P3 quedan
+        deshabilitados y se muestra el error.
+        """
+        try:
+            from pathlib import Path
+
+            from ament_index_python.packages import get_package_share_directory
+            from staubli_trajectory.points_config import PointsConfig
+            from staubli_trajectory.trajectory_builder import TrajectoryBuilder
+
+            share = Path(get_package_share_directory(_POINTS_PKG))
+            config_path = share.joinpath(*_POINTS_RELATIVE_CONFIG)
+            config = PointsConfig(str(config_path))
+            plan = TrajectoryBuilder(config).build()
+        except Exception as exc:  # noqa: BLE001 - no cerrar la GUI
+            self._ros_node.get_logger().error(f"P1-P3 no disponibles: {exc}")
+            self._set_status("● P1-P3 NO DISPONIBLES (carga fallida)", _ROJO)
+            self._set_points_enabled(False)
+            return
+
+        if not plan.all_solved or not plan.all_inside_limits:
+            self._ros_node.get_logger().error(
+                "P1-P3 no disponibles: IK sin solución o fuera de límites."
+            )
+            self._set_status("● P1-P3 NO DISPONIBLES (IK no resuelta)", _ROJO)
+            self._set_points_enabled(False)
+            return
+
+        qs: dict = {}
+        for record in plan.records:
+            if getattr(record, "name", None) is not None:
+                qs[record.name] = [float(v) for v in record.q]
+        self._point_plan = plan
+        self._point_qs = qs
+        self._point_ready = True
+        self._set_points_enabled(True)
+        self._ros_node.get_logger().info(
+            "P1-P3 listos: waypoints resueltos desde points.yaml "
+            f"({[r.name for r in plan.records]})."
+        )
+
+    def _set_points_enabled(self, enabled: bool) -> None:
+        """Habilita/deshabilita los botones P1-P3."""
+        for attr in _POINT_BTN_ATTR.values():
+            btn = getattr(self, attr, None)
+            if btn is not None:
+                btn.setEnabled(enabled)
 
     def _on_run(self):
         print("[GUI] EJECUTAR TRAYECTORIA presionado")
