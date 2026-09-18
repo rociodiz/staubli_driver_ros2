@@ -1,0 +1,1 @@
+"""Paquete 'staubli_trajectory': control del TX2-60L sin MoveIt."""

@@ -9,10 +9,8 @@
       (z = 0) up to the slab underside (z = 0.45).
     - robot_platform: 0.30 x 0.30 x 0.30 m box centered at (0, 0),
       resting on the floor, as an elevated base for the robot.
-    - Three static workpieces on the table:
+    - One static workpiece on the table:
         part_1: box        0.08 x 0.08 x 0.08   at (0.00, 0.41, 0.54)
-        part_2: cylinder   r = 0.05, h = 0.08   at (0.13, 0.46, 0.54)
-        part_3: plate      0.12 x 0.10 x 0.025  at (-0.13, 0.44, 0.5125)
 
   The robot itself is spawned separately by `ros_gz_sim create` from
   /robot_description, so it is NOT part of this world file.
@@ -88,7 +86,7 @@
          the floor (world z = 0) to the slab underside (world z = 0.45). -->
     <model name="inspection_table">
       <static>true</static>
-      <pose>0.00 0.50 0.475 0 0 0</pose>
+      <pose>0.00 0.75 0.475 0 0 0</pose>
       <link name="table_link">
         <visual name="table_top_visual">
           <geometry>
@@ -241,7 +239,7 @@
     <!-- Workpieces on the table (bases at z = 0.50 m). -->
     <model name="part_1">
       <static>true</static>
-      <pose>0.00 0.41 0.54 0 0 0</pose>
+      <pose>0.00 0.66 0.54 0 0 0</pose>
       <link name="link">
         <visual name="visual">
           <geometry>
@@ -259,60 +257,6 @@
           <geometry>
             <box>
               <size>0.08 0.08 0.08</size>
-            </box>
-          </geometry>
-        </collision>
-      </link>
-    </model>
-
-    <model name="part_2">
-      <static>true</static>
-      <pose>0.13 0.46 0.54 0 0 0</pose>
-      <link name="link">
-        <visual name="visual">
-          <geometry>
-            <cylinder>
-              <radius>0.05</radius>
-              <length>0.08</length>
-            </cylinder>
-          </geometry>
-          <material>
-            <ambient>0.0 0.3 0.8 1</ambient>
-            <diffuse>0.0 0.3 0.8 1</diffuse>
-            <specular>0.2 0.2 0.2 1</specular>
-          </material>
-        </visual>
-        <collision name="collision">
-          <geometry>
-            <cylinder>
-              <radius>0.05</radius>
-              <length>0.08</length>
-            </cylinder>
-          </geometry>
-        </collision>
-      </link>
-    </model>
-
-    <model name="part_3">
-      <static>true</static>
-      <pose>-0.13 0.44 0.5125 0 0 0</pose>
-      <link name="link">
-        <visual name="visual">
-          <geometry>
-            <box>
-              <size>0.12 0.10 0.025</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>0.53 0.52 0.51 1</ambient>
-            <diffuse>0.53 0.52 0.51 1</diffuse>
-            <specular>0.3 0.3 0.3 1</specular>
-          </material>
-        </visual>
-        <collision name="collision">
-          <geometry>
-            <box>
-              <size>0.12 0.10 0.025</size>
             </box>
           </geometry>
         </collision>

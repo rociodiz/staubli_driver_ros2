@@ -1,0 +1,84 @@
+# ============================================================================
+#  CONFIGURACIÓN DE LOS PUNTOS DE LA TRAYECTORIA  (ÚNICA ZONA A EDITAR)
+# ============================================================================
+#  El nodo lee ESTE fichero: para cambiar la trayectoria no es necesario
+#  tocar el código. Admite cualquier número de puntos.
+#
+#  Flujo del nodo:
+#    puntos cartesianos (tool0 / base_link) -> orientación + IK (PyKDL)
+#    -> q1..q6 -> verificación de límites -> FollowJointTrajectory.
+#
+#  Modificar el número/posición de los puntos = solo editar la sección 'points'.
+# ============================================================================
+
+joint_names:
+  - joint_1
+  - joint_2
+  - joint_3
+  - joint_4
+  - joint_5
+  - joint_6
+
+# 'cartesian' = puntos XYZ de tool0 en 'planning_frame' (IK automática).
+# 'joint'     = diagnóstico local con 'positions: [6 rad]' (sin IK).
+point_type: cartesian
+
+# Frame en el que se expresan 'position' de los puntos (TCP tool0).
+planning_frame: base_link
+
+# ----------------------------------------------------------------------------
+# ORIENTACIÓN DE tool0
+# ----------------------------------------------------------------------------
+# orientation_mode:
+#   - 'manual'              -> cada punto DEBE fijar 'quaternion_xyzw'.
+#   - 'look_at_part_center' -> el eje +Z de tool0 se calcula para apuntar al
+#                              'part_center_base_link'. Un punto concreto puede
+#                              sobreescribirlo añadiendo 'quaternion_xyzw'.
+# En el futuro, la posición de la pieza podría leerse de sensor/topología;
+# aquí se configura en 'part_center_base_link'.
+# ----------------------------------------------------------------------------
+orientation_mode: look_at_part_center
+
+# Centro de la pieza en base_link: world (0.0, 0.66, 0.54) menos el offset
+# world->base_link (0, 0, 0.30) del spawn de Gazebo => (0.0, 0.66, 0.24).
+part_center_base_link: [0.0, 0.66, 0.24]
+
+# ----------------------------------------------------------------------------
+# PUNTOS DE LA PRUEBA (3 ejemplos alrededor de la pieza, ajustables).
+# Cada punto: position (tool0 en base_link, metros) + time_from_start (s,
+# estrictamente creciente). La orientación es automática (+Z -> pieza).
+# Para fijar orientación manual, añadir: quaternion_xyzw: [x, y, z, w]
+# ----------------------------------------------------------------------------
+points:
+  - name: inspection_fronto_superior
+    position: [0.0, 0.55, 0.38]
+    time_from_start: 0.0
+
+  - name: inspection_izquierda
+    position: [-0.22, 0.48, 0.36]
+    time_from_start: 5.0
+
+  - name: inspection_derecha
+    position: [0.22, 0.48, 0.36]
+    time_from_start: 10.0
+
+  - name: home
+    positions: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    time_from_start: 15.0
+
+# ----------------------------------------------------------------------------
+# Parámetros del solver de IK (multi-semilla determinista)
+# ----------------------------------------------------------------------------
+random_seed: 42
+n_random_seeds: 30
+
+# ----------------------------------------------------------------------------
+# Tolerancias del goal (JointTolerance). Posición en rad, velocidad/acc en
+# rad/s y rad/s². 'goal_time_tolerance' es el margen temporal del punto final.
+# ----------------------------------------------------------------------------
+goal_tolerance:
+  position: 0.01
+  velocity: 0.05
+  acceleration: 0.1
+
+goal_time_tolerance: 2.5
