@@ -44,17 +44,22 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
     QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
+    QListWidget,
     QMainWindow,
     QPlainTextEdit,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
+
+from .user_points import UserPoint, UserPointStore, rpy_degrees_to_quaternion_xyzw
 
 
 # ─── Colores ───────────────────────────────────────────────────────────
@@ -150,6 +155,10 @@ _POINT_WAYPOINT_NAMES = {
     "P2": "inspection_izquierda",
     "P3": "inspection_derecha",
 }
+
+# ── Trayectoria definida por el usuario ─────────────────────────────────
+# Paso temporal entre waypoints (5 s, 10 s, 15 s, ...). No usa points.yaml.
+_USER_TRAJ_STEP_S = 5.0
 
 
 def _stylesheet() -> str:
@@ -269,6 +278,10 @@ class MainWindow(QMainWindow):
         self._point_plan = None
         self._point_qs: dict = {}
         self._point_ready = False
+        self._store: UserPointStore | None = None
+        self._user_trajectory: list[str] = []  # nombres de UserPoint en orden
+        self._joints_now: dict | None = None  # última lectura /joint_states
+        self._user_kinematics = None
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -283,6 +296,10 @@ class MainWindow(QMainWindow):
         title.setStyleSheet(f"color: {_BLANCO}; padding: 2px;")
         root.addWidget(title)
 
+        # ── Fila superior: Estado + Control + Home / Referenciar ──────
+        row_top = QHBoxLayout()
+        row_top.setSpacing(8)
+
         # ── Indicador de estado ───────────────────────────────────────
         status_box = _make_box("Estado del robot")
         hb = QHBoxLayout(status_box)
@@ -293,7 +310,7 @@ class MainWindow(QMainWindow):
         self._status_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         hb.addWidget(self._status_label)
         hb.addStretch()
-        root.addWidget(status_box)
+        row_top.addWidget(status_box, 3)
 
         # ── ENABLE / DISABLE ─────────────────────────────────────────
         ctrl_box = _make_box("Control")
@@ -303,7 +320,7 @@ class MainWindow(QMainWindow):
         hb2.addWidget(self.btn_enable)
         hb2.addWidget(self.btn_disable)
         hb2.addStretch()
-        root.addWidget(ctrl_box)
+        row_top.addWidget(ctrl_box, 2)
 
         # ── HOME ──────────────────────────────────────────────────────
         home_box = _make_box("Home / Referenciar")
@@ -312,7 +329,13 @@ class MainWindow(QMainWindow):
         hb3.addStretch()
         hb3.addWidget(self.btn_home)
         hb3.addStretch()
-        root.addWidget(home_box)
+        row_top.addWidget(home_box, 1)
+
+        root.addLayout(row_top)
+
+        # ── Segunda zona: Puntos de inspección + Puntos del usuario ───
+        row_pts = QHBoxLayout()
+        row_pts.setSpacing(8)
 
         # ── Puntos de inspección ──────────────────────────────────────
         pts_box = _make_box("Puntos de inspección")
@@ -325,7 +348,57 @@ class MainWindow(QMainWindow):
         hb4.addWidget(self.btn_p2)
         hb4.addWidget(self.btn_p3)
         hb4.addStretch()
-        root.addWidget(pts_box)
+        row_pts.addWidget(pts_box, 1)
+
+        # ── Puntos del usuario ────────────────────────────────────────
+        up_box = _make_box("Puntos del usuario")
+        up_v = QVBoxLayout(up_box)
+        up_v.setSpacing(6)
+        self._points_list = QListWidget()
+        self._points_list.setStyleSheet(
+            f"QListWidget {{ background-color: {_NEGRO}; color: {_BLANCO_HUESO};"
+            f" border: 1px solid {_GRIS_MED}; border-radius: 4px;"
+            f" font-family: {_FAM_MONO}; font-size: 12px; }}"
+            f"QListWidget::item {{ padding: 3px 6px; }}"
+            f"QListWidget::item:selected {{ background-color: {_AZUL}; }}"
+        )
+        self._points_list.setMinimumHeight(110)
+        up_v.addWidget(self._points_list)
+        up_btns = QHBoxLayout()
+        up_btns.setSpacing(6)
+        self.btn_new_point = _make_btn(
+            "NUEVO PUNTO", _btn_style(_AZUL, font_size=11, min_h=30, pad="4px 10px")
+        )
+        self.btn_edit_point = _make_btn(
+            "EDITAR", _btn_style(_GRIS_MED, font_size=11, min_h=30, pad="4px 10px")
+        )
+        self.btn_delete_point = _make_btn(
+            "ELIMINAR", _btn_style(_ROJO, font_size=11, min_h=30, pad="4px 10px")
+        )
+        self.btn_move_point = _make_btn(
+            "MOVER A PUNTO", _btn_style(_VERDE, font_size=11, min_h=30, pad="4px 10px")
+        )
+        self.btn_add_to_traj = _make_btn(
+            "AÑADIR A TRAYECTORIA",
+            _btn_style(_AZUL, font_size=11, min_h=30, pad="4px 10px"),
+        )
+        up_btns.addWidget(self.btn_new_point)
+        up_btns.addWidget(self.btn_edit_point)
+        up_btns.addWidget(self.btn_delete_point)
+        up_btns.addWidget(self.btn_move_point)
+        up_btns.addWidget(self.btn_add_to_traj)
+        up_v.addLayout(up_btns)
+        self.btn_edit_point.setEnabled(False)
+        self.btn_delete_point.setEnabled(False)
+        self.btn_move_point.setEnabled(False)
+        self.btn_add_to_traj.setEnabled(False)
+        row_pts.addWidget(up_box, 2)
+
+        root.addLayout(row_pts)
+
+        # ── Tercera zona: Trayectoria + Articulaciones ────────────────
+        row_mid = QHBoxLayout()
+        row_mid.setSpacing(8)
 
         # ── Ejecutar trayectoria ──────────────────────────────────────
         traj_box = _make_box("Trayectoria")
@@ -337,26 +410,47 @@ class MainWindow(QMainWindow):
         hb5.addStretch()
         hb5.addWidget(self.btn_run)
         hb5.addStretch()
-        root.addWidget(traj_box)
+        row_mid.addWidget(traj_box, 1)
 
-        # ── STOP ──────────────────────────────────────────────────────
-        stop_box = _make_box("Seguridad")
-        hb6 = QHBoxLayout(stop_box)
-        self.btn_stop = _make_btn(
-            "STOP",
-            _btn_style(
-                _ROJO,
-                font_size=14,
-                min_w=180,
-                min_h=44,
-                pad="10px 24px",
-                extra=f"QPushButton:hover {{ background-color: {_ROJO_CLARO}; }}",
-            ),
+        # ── Trayectoria definida por el usuario (orden editable) ──────
+        traj_user_box = _make_box("Trayectoria definida")
+        tuv = QVBoxLayout(traj_user_box)
+        tuv.setSpacing(6)
+        self._trajectory_list = QListWidget()
+        self._trajectory_list.setStyleSheet(
+            f"QListWidget {{ background-color: {_NEGRO}; color: {_BLANCO_HUESO};"
+            f" border: 1px solid {_GRIS_MED}; border-radius: 4px;"
+            f" font-family: {_FAM_MONO}; font-size: 12px; }}"
+            f"QListWidget::item {{ padding: 3px 6px; }}"
+            f"QListWidget::item:selected {{ background-color: {_AZUL}; }}"
         )
-        hb6.addStretch()
-        hb6.addWidget(self.btn_stop)
-        hb6.addStretch()
-        root.addWidget(stop_box)
+        self._trajectory_list.setMinimumHeight(110)
+        tuv.addWidget(self._trajectory_list)
+        tuv_btns = QHBoxLayout()
+        tuv_btns.setSpacing(6)
+        self.btn_traj_up = _make_btn(
+            "↑", _btn_style(_GRIS_MED, font_size=12, min_h=30, min_w=40, pad="2px 6px")
+        )
+        self.btn_traj_down = _make_btn(
+            "↓", _btn_style(_GRIS_MED, font_size=12, min_h=30, min_w=40, pad="2px 6px")
+        )
+        self.btn_traj_remove = _make_btn(
+            "QUITAR", _btn_style(_ROJO, font_size=11, min_h=30, pad="4px 10px")
+        )
+        self.btn_traj_clear = _make_btn(
+            "LIMPIAR", _btn_style(_GRIS_MED, font_size=11, min_h=30, pad="4px 10px")
+        )
+        tuv_btns.addWidget(self.btn_traj_up)
+        tuv_btns.addWidget(self.btn_traj_down)
+        tuv_btns.addWidget(self.btn_traj_remove)
+        tuv_btns.addWidget(self.btn_traj_clear)
+        tuv_btns.addStretch()
+        tuv.addLayout(tuv_btns)
+        self.btn_traj_up.setEnabled(False)
+        self.btn_traj_down.setEnabled(False)
+        self.btn_traj_remove.setEnabled(False)
+        self.btn_traj_clear.setEnabled(False)
+        row_mid.addWidget(traj_user_box, 2)
 
         # ── Articulaciones J1-J6 ──────────────────────────────────────
         jnt_box = _make_box("Articulaciones")
@@ -393,7 +487,28 @@ class MainWindow(QMainWindow):
             self._joint_labels[name] = lbl_val
             grid.addWidget(lbl_name, row, col * 2)
             grid.addWidget(lbl_val,  row, col * 2 + 1)
-        root.addWidget(jnt_box)
+        row_mid.addWidget(jnt_box, 2)
+
+        root.addLayout(row_mid)
+
+        # ── STOP ──────────────────────────────────────────────────────
+        stop_box = _make_box("Seguridad")
+        hb6 = QHBoxLayout(stop_box)
+        self.btn_stop = _make_btn(
+            "STOP",
+            _btn_style(
+                _ROJO,
+                font_size=14,
+                min_w=180,
+                min_h=44,
+                pad="10px 24px",
+                extra=f"QPushButton:hover {{ background-color: {_ROJO_CLARO}; }}",
+            ),
+        )
+        hb6.addStretch()
+        hb6.addWidget(self.btn_stop)
+        hb6.addStretch()
+        root.addWidget(stop_box)
 
         # ── Mensajes / log del sistema ───────────────────────────────
         log_box = _make_box("Mensajes")
@@ -441,11 +556,29 @@ class MainWindow(QMainWindow):
         self.btn_run.clicked.connect(self._on_run)
         self.btn_stop.clicked.connect(self._on_stop)
         self._btn_log_clear.clicked.connect(self._clear_log)
+        self._points_list.currentItemChanged.connect(self._update_point_buttons)
+        self.btn_new_point.clicked.connect(self._new_point)
+        self.btn_edit_point.clicked.connect(self._edit_point)
+        self.btn_delete_point.clicked.connect(self._delete_point)
+        self.btn_move_point.clicked.connect(self._move_to_point)
+        self.btn_add_to_traj.clicked.connect(self._on_add_to_trajectory)
+        self._trajectory_list.currentItemChanged.connect(
+            self._update_trajectory_buttons
+        )
+        self.btn_traj_up.clicked.connect(self._on_traj_move_up)
+        self.btn_traj_down.clicked.connect(self._on_traj_move_down)
+        self.btn_traj_remove.clicked.connect(self._on_traj_remove)
+        self.btn_traj_clear.clicked.connect(self._on_traj_clear)
+
+        # ── Almacén de puntos del usuario (independiente de ROS) ───────
+        self._load_user_points()
 
         # ── Dimensionado: generoso y nunca menor que el contenido ─────
+        # min_h se baja para aprovechar el layout horizontal y caber en un
+        # portátil; sin llegar a comprimir el panel de mensajes.
         self.adjustSize()
         min_w = max(640, self.sizeHint().width())
-        min_h = max(720, self.sizeHint().height())
+        min_h = max(560, self.sizeHint().height())
         self.setMinimumSize(min_w, min_h)
         self.resize(min_w, min_h)
 
@@ -502,6 +635,7 @@ class MainWindow(QMainWindow):
     def _on_joint_states(self, msg: JointState) -> None:
         """Actualiza J1-J6 con la posición real de cada articulación."""
         positions = dict(zip(msg.name, msg.position))
+        self._joints_now = positions
         for ros_name, gui_key in _ROS_JOINT_MAP.items():
             if ros_name in positions:
                 self._joint_labels[gui_key].setText(f"{positions[ros_name]:.4f}")
@@ -699,6 +833,403 @@ class MainWindow(QMainWindow):
             tag=name,
         )
 
+    # ── Puntos del usuario (crear/editar/eliminar/mover) ──────────────
+    def _load_user_points(self) -> None:
+        """Carga el almacén de puntos del usuario (independiente de ROS)."""
+        self._store = UserPointStore()
+        self._store.load()
+        if self._store.errors:
+            for err in self._store.errors:
+                self._log("warning", f"[PUNTOS] {err}")
+        if self._store.names():
+            self._log("info", f"[PUNTOS] {len(self._store.names())} punto(s) cargado(s)")
+        self._refresh_points_list()
+
+    def _save_user_points(self) -> None:
+        try:
+            self._store.save()
+        except OSError as exc:  # noqa: BLE001 - no romper la GUI
+            self._log("error", f"[PUNTOS] No se pudo guardar ({exc})")
+
+    def _refresh_points_list(self) -> None:
+        if self._points_list is None:
+            return
+        self._points_list.blockSignals(True)
+        self._points_list.clear()
+        for name in self._store.names():
+            self._points_list.addItem(name)
+        self._points_list.blockSignals(False)
+        self._update_point_buttons()
+
+    def _current_point(self) -> UserPoint | None:
+        if self._points_list is None or self._store is None:
+            return None
+        item = self._points_list.currentItem()
+        if item is None:
+            return None
+        return self._store.get(item.text())
+
+    def _update_point_buttons(self, *_args) -> None:
+        has = self._current_point() is not None
+        self.btn_edit_point.setEnabled(has)
+        self.btn_delete_point.setEnabled(has)
+        self.btn_move_point.setEnabled(has and not self._motion_active)
+        self.btn_add_to_traj.setEnabled(has and not self._motion_active)
+        self._update_trajectory_buttons()
+
+    # ── Trayectoria definida por el usuario (orden y ejecución) ────────
+    def _refresh_trajectory_list(self, select_row: int | None = None) -> None:
+        """Refresca la lista de trayectoria a partir de self._user_trajectory."""
+        if self._trajectory_list is None:
+            return
+        self._trajectory_list.blockSignals(True)
+        self._trajectory_list.clear()
+        for i, name in enumerate(self._user_trajectory, start=1):
+            self._trajectory_list.addItem(f"{i}. {name}")
+        if select_row is not None and 0 <= select_row < len(self._user_trajectory):
+            self._trajectory_list.setCurrentRow(select_row)
+        self._trajectory_list.blockSignals(False)
+        self._update_trajectory_buttons()
+
+    def _update_trajectory_buttons(self, *_args) -> None:
+        """Habilita/deshabilita los controles de la trayectoria (y btn_run)."""
+        if getattr(self, "_trajectory_list", None) is None:
+            return
+        busy = self._motion_active
+        n = len(self._user_trajectory)
+        row = self._trajectory_list.currentRow()
+        self.btn_traj_up.setEnabled(not busy and 1 <= row < n)
+        self.btn_traj_down.setEnabled(not busy and 0 <= row < n - 1)
+        self.btn_traj_remove.setEnabled(not busy and 0 <= row < n)
+        self.btn_traj_clear.setEnabled(not busy and n > 0)
+        self.btn_run.setEnabled(not busy)
+        self.btn_add_to_traj.setEnabled(
+            not busy and self._current_point() is not None
+        )
+
+    def _on_add_to_trajectory(self) -> None:
+        """Añade el punto del usuario seleccionado al final de la trayectoria."""
+        if self._motion_active:
+            return
+        point = self._current_point()
+        if point is None:
+            self._log("warning", "TRAYECTORIA: selecciona un punto del usuario")
+            return
+        self._user_trajectory.append(point.name)
+        self._refresh_trajectory_list(select_row=len(self._user_trajectory) - 1)
+        self._log("ok", f"TRAYECTORIA: añadido {point.name}")
+
+    def _on_traj_move_up(self) -> None:
+        """Mueve el elemento seleccionado una posición hacia arriba."""
+        self._move_trajectory_item(-1)
+
+    def _on_traj_move_down(self) -> None:
+        """Mueve el elemento seleccionado una posición hacia abajo."""
+        self._move_trajectory_item(+1)
+
+    def _move_trajectory_item(self, delta: int) -> None:
+        if self._motion_active:
+            return
+        row = self._trajectory_list.currentRow()
+        new = row + delta
+        n = len(self._user_trajectory)
+        if not (0 <= row < n and 0 <= new < n):
+            return
+        self._user_trajectory[row], self._user_trajectory[new] = (
+            self._user_trajectory[new],
+            self._user_trajectory[row],
+        )
+        self._refresh_trajectory_list(select_row=new)
+        self._log("info", "TRAYECTORIA: orden actualizado")
+
+    def _on_traj_remove(self) -> None:
+        """Quita el elemento seleccionado de la trayectoria (sin borrar el punto)."""
+        if self._motion_active:
+            return
+        row = self._trajectory_list.currentRow()
+        n = len(self._user_trajectory)
+        if not (0 <= row < n):
+            return
+        name = self._user_trajectory.pop(row)
+        select = min(row, len(self._user_trajectory) - 1)
+        self._refresh_trajectory_list(select_row=select if select >= 0 else None)
+        self._log("info", f"TRAYECTORIA: eliminado {name}")
+
+    def _on_traj_clear(self) -> None:
+        """Vacía únicamente la trayectoria actual (los puntos se conservan)."""
+        if self._motion_active:
+            return
+        if not self._user_trajectory:
+            return
+        self._user_trajectory.clear()
+        self._refresh_trajectory_list()
+        self._log("info", "TRAYECTORIA: lista limpiada")
+
+    def _resolve_user_trajectory(self) -> list[UserPoint] | None:
+        """Valida los nombres del usuario; devuelve los UserPoint en orden o None."""
+        resolved: list[UserPoint] = []
+        for name in self._user_trajectory:
+            point = self._store.get(name) if self._store is not None else None
+            if point is None:
+                self._log("error", f"TRAYECTORIA: '{name}' ya no existe")
+                return None
+            if (
+                not point.solved
+                or not point.inside_limits
+                or point.q is None
+                or len(point.q) != 6
+            ):
+                self._log("error", f"TRAYECTORIA: '{name}' sin q válida")
+                return None
+            resolved.append(point)
+        return resolved
+
+    def _default_next_point_name(self) -> str:
+        n = 1
+        while self._store.has(f"Punto {n}"):
+            n += 1
+        return f"Punto {n}"
+
+    def _build_point_dialog(
+        self,
+        *,
+        title: str,
+        original_name: str | None = None,
+        initial: UserPoint | None = None,
+        default_name: str | None = None,
+    ):
+        """Diálogo modal de edición/creación de un punto (tool0, grados)."""
+        if initial is not None:
+            default_name = initial.name
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"{title} — Puntos del usuario")
+        dlg.setModal(True)
+        dlg.setMinimumWidth(380)
+        dlg.setStyleSheet(
+            f"QDialog {{ background-color: {_NEGRO}; }}"
+            f"QLabel {{ color: {_BLANCO_HUESO}; }}"
+            f"QLineEdit {{ background-color: {_GRIS_OSC}; color: {_BLANCO};"
+            f" border: 1px solid {_GRIS_MED}; border-radius: 4px;"
+            f" padding: 4px 8px; font-family: {_FAM_MONO}; }}"
+        )
+        root = QVBoxLayout(dlg)
+        root.setSpacing(10)
+
+        titulo = QLabel(title)
+        titulo.setStyleSheet(
+            f"font-size: 16px; font-weight: bold; color: {_AMARILLO};"
+        )
+        root.addWidget(titulo)
+
+        keys = ["Nombre", "X", "Y", "Z", "RX", "RY", "RZ"]
+        etiquetas = [
+            "Nombre",
+            "X (m)",
+            "Y (m)",
+            "Z (m)",
+            "RX (grados)",
+            "RY (grados)",
+            "RZ (grados)",
+        ]
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(8)
+        fields: dict = {}
+        for i, (key, etiqueta) in enumerate(zip(keys, etiquetas)):
+            lbl = QLabel(etiqueta)
+            grid.addWidget(lbl, i, 0, Qt.AlignRight)
+            edit = QLineEdit()
+            edit.setPlaceholderText(
+                key if key == "Nombre" else ("0.300" if key in "XYZ" else "0.0")
+            )
+            grid.addWidget(edit, i, 1)
+            fields[key] = edit
+        root.addLayout(grid)
+
+        error_label = QLabel("")
+        error_label.setStyleSheet(
+            f"color: {_ROJO_CLARO}; font-size: 12px; font-weight: bold;"
+        )
+        error_label.setWordWrap(True)
+        error_label.hide()
+        root.addWidget(error_label)
+
+        def _guardar() -> None:
+            parsed = self._validate_point_form(
+                fields, error_label, original_name=original_name
+            )
+            if parsed is None:
+                return
+            name, position, rpy = parsed
+            point, reason = self._resolve_point(name, position, rpy)
+            if point is None:
+                error_label.setText(reason)
+                error_label.show()
+                self._log("error", f"{name} NO GUARDADO: {reason}")
+                return
+            dlg._resolved_point = point
+            dlg.accept()
+
+        if initial is not None:
+            fields["Nombre"].setText(initial.name)
+            for key, valor in zip(("X", "Y", "Z"), initial.position_xyz):
+                fields[key].setText(f"{valor:.4f}")
+            for key, valor in zip(("RX", "RY", "RZ"), initial.rpy_degrees):
+                fields[key].setText(f"{valor:.4f}")
+        elif default_name:
+            fields["Nombre"].setText(default_name)
+
+        btns = QHBoxLayout()
+        btn_save = _make_btn("GUARDAR PUNTO", _btn_style(_VERDE, min_w=140, min_h=34))
+        btn_cancel = _make_btn("CANCELAR", _btn_style(_GRIS_MED, min_w=120, min_h=34))
+        btn_save.clicked.connect(_guardar)
+        btn_cancel.clicked.connect(dlg.reject)
+        btns.addStretch()
+        btns.addWidget(btn_save)
+        btns.addWidget(btn_cancel)
+        root.addLayout(btns)
+
+        return dlg
+
+    def _validate_point_form(
+        self, fields: dict, error_label: QLabel, original_name: str | None = None
+    ):
+        """Valida los campos del diálogo; devuelve (nombre, pos, rpy) o None."""
+        nombre = fields["Nombre"].text().strip()
+        if not nombre:
+            error_label.setText("El nombre no puede estar vacío.")
+            error_label.show()
+            return None
+        if self._store.has(nombre) and nombre != original_name:
+            error_label.setText(f"Ya existe un punto llamado '{nombre}'.")
+            error_label.show()
+            return None
+
+        valores: list[float] = []
+        for key, etiqueta in zip(
+            ("X", "Y", "Z", "RX", "RY", "RZ"),
+            ("X", "Y", "Z", "RX", "RY", "RZ"),
+        ):
+            texto = fields[key].text().strip()
+            if not texto:
+                error_label.setText(f"El campo {etiqueta} está vacío.")
+                error_label.show()
+                return None
+            try:
+                valores.append(float(texto))
+            except ValueError:
+                error_label.setText(f"'{texto}' no es un número válido en {etiqueta}.")
+                error_label.show()
+                return None
+        return nombre, valores[0:3], valores[3:6]
+
+    def _resolve_point(self, name: str, position_xyz: list, rpy_degrees: list):
+        """IK de tool0 -> base_link reutilizando Tx260lKinematics.
+
+        Devuelve (UserPoint, '') si la IK resuelve dentro de límites, o
+        (None, motivo) si no; en ese caso el punto NO se guarda.
+        """
+        quaternion = rpy_degrees_to_quaternion_xyzw(*rpy_degrees)
+        if self._user_kinematics is None:
+            from staubli_trajectory.tx2_60l_ik import Tx260lKinematics
+
+            self._user_kinematics = Tx260lKinematics()
+
+        q_ref = None
+        if self._joints_now is not None:
+            try:
+                q_ref = [self._joints_now[j] for j in _HOME_JOINT_NAMES]
+            except KeyError:
+                q_ref = None
+
+        frame = self._user_kinematics.frame_from_position_quaternion(
+            position_xyz, quaternion
+        )
+        res = self._user_kinematics.inverse_kinematics(
+            frame, q_prev=q_ref, q_state=q_ref
+        )
+        if not res.solved:
+            return None, "IK sin solución para esas coordenadas."
+        if not res.inside_limits:
+            fuera = [
+                joint
+                for joint, ok in zip(_HOME_JOINT_NAMES, res.joints_inside)
+                if not ok
+            ]
+            return None, f"FUERA DE LÍMITES: {', '.join(fuera)}."
+        return (
+            UserPoint(
+                name=name,
+                position_xyz=[float(v) for v in position_xyz],
+                rpy_degrees=[float(v) for v in rpy_degrees],
+                quaternion_xyzw=[float(v) for v in quaternion],
+                q=[float(v) for v in res.q],
+                solved=True,
+                inside_limits=True,
+            ),
+            "",
+        )
+
+    def _new_point(self) -> None:
+        if self._store is None:
+            return
+        dlg = self._build_point_dialog(
+            title="NUEVO PUNTO",
+            original_name=None,
+            default_name=self._default_next_point_name(),
+        )
+        if dlg.exec() == QDialog.Accepted:
+            point = getattr(dlg, "_resolved_point", None)
+            if point is None:
+                return
+            self._log("ok", f"[PUNTOS] IK válida para '{point.name}'")
+            self._store.add(point)
+            self._save_user_points()
+            self._refresh_points_list()
+            self._log("ok", f"[PUNTOS] Punto '{point.name}' creado")
+
+    def _edit_point(self) -> None:
+        point = self._current_point()
+        if point is None or self._store is None:
+            return
+        dlg = self._build_point_dialog(
+            title=f"EDITAR {point.name}",
+            original_name=point.name,
+            initial=point,
+        )
+        if dlg.exec() == QDialog.Accepted:
+            nuevo = getattr(dlg, "_resolved_point", None)
+            if nuevo is None:
+                return
+            self._log("ok", f"[PUNTOS] IK válida para '{nuevo.name}'")
+            self._store.update(nuevo, previous_name=point.name)
+            self._save_user_points()
+            self._refresh_points_list()
+            self._log("ok", f"[PUNTOS] Punto '{point.name}' actualizado")
+
+    def _delete_point(self) -> None:
+        point = self._current_point()
+        if point is None or self._store is None:
+            return
+        self._store.remove(point.name)
+        self._save_user_points()
+        self._refresh_points_list()
+        self._log("ok", f"[PUNTOS] Punto '{point.name}' eliminado")
+
+    def _move_to_point(self) -> None:
+        point = self._current_point()
+        if point is None or self._store is None:
+            return
+        goal = self._build_single_goal(point.q, _POINT_DURATION_S)
+        self._run_goal(
+            goal=goal,
+            button=self.btn_move_point,
+            moving_text=f"MOVIENDO A {point.name}...",
+            ok_text=f"{point.name} ALCANZADO",
+            tag=point.name,
+            fail_text=f"{point.name}: MOVIMIENTO FALLIDO",
+        )
+
     def _run_goal(
         self,
         *,
@@ -707,12 +1238,15 @@ class MainWindow(QMainWindow):
         moving_text: str,
         ok_text: str,
         tag: str,
+        fail_text: str | None = None,
     ) -> None:
-        """Envío común HOME/P1-P3/TRAYECTORIA: comprueba, envía y sigue.
+        """Envío común HOME/P1-P3/TRAYECTORIA/PUNTO: comprueba, envía y sigue.
 
         Comparte el flujo asíncrono (controller 'active' -> send_goal_async
         -> aceptado -> get_result_async -> resultado real) y garantiza que
         solo haya un movimiento en curso a la vez (_motion_active).
+        'fail_text', si se da, personaliza el mensaje/estado de fallo (por
+        defecto se usa el formato genérico '<TAG> FALLÓ: <código>').
         """
         if self._motion_active:
             return
@@ -749,6 +1283,7 @@ class MainWindow(QMainWindow):
                     moving_text=moving_text,
                     ok_text=ok_text,
                     tag=tag,
+                    fail_text=fail_text,
                 )
             )
         except Exception as exc:  # noqa: BLE001 - no romper la GUI
@@ -763,6 +1298,7 @@ class MainWindow(QMainWindow):
         moving_text: str,
         ok_text: str,
         tag: str,
+        fail_text: str | None = None,
     ) -> None:
         """Solo envía el goal si joint_trajectory_controller está 'active'."""
         if self._stop_requested:
@@ -783,7 +1319,9 @@ class MainWindow(QMainWindow):
         if estado != "active":
             self._log("error", f"{tag}: controller {estado or 'NO ENCONTRADO'}")
             self._finish_motion(
-                f"● {tag}: CONTROLLER {estado or 'NO ENCONTRADO'} (se requiere active)",
+                fail_text
+                and f"● {fail_text} (controller {estado or 'NO ENCONTRADO'})"
+                or f"● {tag}: CONTROLLER {estado or 'NO ENCONTRADO'} (se requiere active)",
                 _ROJO,
             )
             return
@@ -800,7 +1338,7 @@ class MainWindow(QMainWindow):
         goal_future = self._action_client.send_goal_async(goal)
         goal_future.add_done_callback(
             lambda fut: self._on_motion_goal_response(
-                fut, button=button, ok_text=ok_text, tag=tag
+                fut, button=button, ok_text=ok_text, tag=tag, fail_text=fail_text
             )
         )
 
@@ -829,6 +1367,29 @@ class MainWindow(QMainWindow):
         self._fill_goal_tolerances(goal)
         return goal
 
+    def _build_user_trajectory_goal(self) -> FollowJointTrajectory.Goal:
+        """Goal multi-waypoint desde la lista del usuario (q ya resuelta).
+
+        Un JointTrajectoryPoint por punto, positions = point.q (rad) y
+        time_from_start = 5/10/15... s (paso _USER_TRAJ_STEP_S).
+        """
+        trajectory = JointTrajectory()
+        trajectory.joint_names = list(_HOME_JOINT_NAMES)
+        for i, name in enumerate(self._user_trajectory, start=1):
+            point = self._store.get(name) if self._store is not None else None
+            if point is None or point.q is None:
+                continue
+            msg_point = JointTrajectoryPoint()
+            msg_point.positions = [float(v) for v in point.q]
+            msg_point.time_from_start = Duration(
+                seconds=_USER_TRAJ_STEP_S * i
+            ).to_msg()
+            trajectory.points.append(msg_point)
+        goal = FollowJointTrajectory.Goal()
+        goal.trajectory = trajectory
+        self._fill_goal_tolerances(goal)
+        return goal
+
     def _fill_goal_tolerances(self, goal: FollowJointTrajectory.Goal) -> None:
         """Aplica las tolerancias del goal (mismas que staubli_trajectory)."""
         for name in _HOME_JOINT_NAMES:
@@ -842,7 +1403,9 @@ class MainWindow(QMainWindow):
             seconds=_HOME_GOAL_TIME_TOL_S
         ).to_msg()
 
-    def _on_motion_goal_response(self, future, *, button, ok_text: str, tag: str):
+    def _on_motion_goal_response(
+        self, future, *, button, ok_text: str, tag: str, fail_text: str | None = None
+    ):
         """El controller acepta/rechaza el goal; espera el resultado real."""
         try:
             goal_handle = future.result()
@@ -851,7 +1414,9 @@ class MainWindow(QMainWindow):
             return
         if not goal_handle.accepted:
             self._log("error", f"{tag}: goal RECHAZADO")
-            self._finish_motion(f"● {tag}: GOAL RECHAZADO", _ROJO)
+            self._finish_motion(
+                fail_text and f"● {fail_text}" or f"● {tag}: GOAL RECHAZADO", _ROJO
+            )
             return
 
         self._motion_goal_handle = goal_handle
@@ -861,10 +1426,14 @@ class MainWindow(QMainWindow):
         )
         result_future = goal_handle.get_result_async()
         result_future.add_done_callback(
-            lambda fut: self._on_motion_result(fut, ok_text=ok_text, tag=tag)
+            lambda fut: self._on_motion_result(
+                fut, ok_text=ok_text, tag=tag, fail_text=fail_text
+            )
         )
 
-    def _on_motion_result(self, future, *, ok_text: str, tag: str) -> None:
+    def _on_motion_result(
+        self, future, *, ok_text: str, tag: str, fail_text: str | None = None
+    ) -> None:
         """Comprueba el estado final del goal (no basta con haberlo enviado).
 
         Nota: joint_trajectory_controller informa SUCCESSFUL al cancelar; por
@@ -906,7 +1475,9 @@ class MainWindow(QMainWindow):
             return
         detalle = f"{nombre}" + (f" — {error_string}" if error_string else "")
         self._log("error", f"{tag}: goal FALLÓ ({detalle})")
-        self._finish_motion(f"● {tag} FALLÓ: {nombre}", _ROJO)
+        self._finish_motion(
+            fail_text and f"● {fail_text}" or f"● {tag} FALLÓ: {nombre}", _ROJO
+        )
 
     def _finish_motion(self, status_text: str, color: str) -> None:
         """Restaura botón y sondeo de estado al terminar (o fallar) un goal."""
@@ -917,6 +1488,7 @@ class MainWindow(QMainWindow):
             self._motion_button.setEnabled(True)
             self._motion_button = None
         self._set_status(status_text, color)
+        self._update_point_buttons()
         QTimer.singleShot(_HOME_STATUS_HOLD_MS, self._resume_status_poll)
 
     def _pause_status_poll(self) -> None:
@@ -979,16 +1551,15 @@ class MainWindow(QMainWindow):
         )
 
     def _set_points_enabled(self, enabled: bool) -> None:
-        """Habilita/deshabilita P1-P3 y EJECUTAR TRAYECTORIA."""
+        """Habilita/deshabilita P1-P3 (btn_run lo gestiona la trayectoria)."""
         for attr in _POINT_BTN_ATTR.values():
             btn = getattr(self, attr, None)
             if btn is not None:
                 btn.setEnabled(enabled)
-        self.btn_run.setEnabled(enabled)
 
-    # ── EJECUTAR TRAYECTORIA (reutiliza plan.trajectory) ─────────────────
+    # ── EJECUTAR TRAYECTORIA (trayectoria definida por el usuario) ───────
     def _on_run(self):
-        """Envía la trayectoria completa (P1->P2->P3->HOME) como goal multi-waypoint."""
+        """Envía la trayectoria de puntos de usuario como goal multi-waypoint."""
         if self._motion_active:
             self._log("info", "EJECUTAR TRAYECTORIA: movimiento en curso, ignorado")
             return
@@ -999,18 +1570,24 @@ class MainWindow(QMainWindow):
         ):
             print("[GUI] EJECUTAR TRAYECTORIA presionado (sin ROS: placeholder)")
             return
-        if not self._point_ready:
-            self._log("error", "TRAYECTORIA NO DISPONIBLE (carga de plan fallida)")
-            self._set_status("● TRAYECTORIA NO DISPONIBLE (carga fallida)", _ROJO)
+        if not self._user_trajectory:
+            self._log("warning", "TRAYECTORIA: no hay puntos definidos")
+            self._set_status("● TRAYECTORIA: no hay puntos definidos", _AMARILLO)
             return
 
-        goal = self._build_trajectory_goal()
+        resolved = self._resolve_user_trajectory()
+        if resolved is None:
+            return
+        self._log("info", f"TRAYECTORIA: preparando {len(resolved)} puntos...")
+        goal = self._build_user_trajectory_goal()
+        self._log("info", "TRAYECTORIA: enviando goal...")
         self._run_goal(
             goal=goal,
             button=self.btn_run,
             moving_text="EJECUTANDO TRAYECTORIA...",
             ok_text="TRAYECTORIA COMPLETADA",
             tag="TRAYECTORIA",
+            fail_text="TRAYECTORIA: MOVIMIENTO FALLIDO",
         )
 
     # ── STOP (cancelación del goal activo; el controller sigue 'active') ─
