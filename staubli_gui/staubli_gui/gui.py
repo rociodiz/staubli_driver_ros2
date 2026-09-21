@@ -15,13 +15,17 @@ Integración ROS 2:
      TrajectoryBuilder); no se duplican coordenadas ni IK aquí.
 
 El bucle ROS se integra con el ciclo de eventos de Qt mediante un QTimer
-que ejecuta rclpy.spin_once(...) periódicamente. ENABLE, DISABLE, P1-P3,
-EJECUTAR TRAYECTORIA y STOP siguen siendo placeholders.
+que ejecuta rclpy.spin_once(...) periódicamente. ENABLE/DISABLE, HOME,
+P1-P3, EJECUTAR TRAYECTORIA (reutiliza plan.trajectory) y STOP (cancela el
+goal activo; el controller permanece 'active') están implementados; el
+panel "Mensajes" refleja en tiempo real los eventos del sistema.
 """
 
 import sys
+import time
 
 import rclpy
+from action_msgs.srv import CancelGoal
 from control_msgs.action import FollowJointTrajectory
 from control_msgs.msg import JointTolerance
 from controller_manager_msgs.srv import ListControllers, SwitchController
@@ -37,7 +41,7 @@ from rclpy.qos import (
 from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QColor, QFont, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -46,6 +50,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QPlainTextEdit,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -128,6 +133,9 @@ _HOME_RESULT_CODES = {
     _HOME_MSG.Result.PATH_TOLERANCE_VIOLATED: "PATH_TOLERANCE_VIOLATED",
     _HOME_MSG.Result.GOAL_TOLERANCE_VIOLATED: "GOAL_TOLERANCE_VIOLATED",
 }
+
+# ── Panel de mensajes ──────────────────────────────────────────────────
+_LOG_MAX_BLOCKS = 200  # log acotado (QPlainTextEdit descarta bloques viejos)
 
 # ── P1/P2/P3 (waypoints individuales; IK reutilizada de staubli_trajectory) ──
 # points.yaml sigue siendo la única fuente de verdad: la GUI solo lee las
@@ -255,7 +263,8 @@ class MainWindow(QMainWindow):
         self._switch_pending = False
         self._action_client: ActionClient | None = None
         self._motion_goal_handle = None
-        self._motion_active = False  # exclusividad HOME + P1-P3
+        self._motion_active = False  # exclusividad HOME + P1-P3 + TRAYECTORIA
+        self._stop_requested = False  # STOP: distingue cancelación vs. éxito
         self._motion_button = None
         self._point_plan = None
         self._point_qs: dict = {}
@@ -386,6 +395,38 @@ class MainWindow(QMainWindow):
             grid.addWidget(lbl_val,  row, col * 2 + 1)
         root.addWidget(jnt_box)
 
+        # ── Mensajes / log del sistema ───────────────────────────────
+        log_box = _make_box("Mensajes")
+        log_v = QVBoxLayout(log_box)
+        log_v.setSpacing(4)
+        log_h = QHBoxLayout()
+        hint = QLabel("Sistema")
+        hint.setStyleSheet(_label_style(_GRIS_CLR, _FAMILIA, 11))
+        log_h.addWidget(hint)
+        log_h.addStretch()
+        self._btn_log_clear = _make_btn(
+            "LIMPIAR",
+            _btn_style(_GRIS_MED, font_size=10, min_h=22, pad="2px 12px"),
+        )
+        log_h.addWidget(self._btn_log_clear)
+        log_v.addLayout(log_h)
+        self._log_edit = QPlainTextEdit()
+        self._log_edit.setReadOnly(True)
+        self._log_edit.setMaximumBlockCount(_LOG_MAX_BLOCKS)
+        self._log_edit.setStyleSheet(
+            "QPlainTextEdit {"
+            f" background-color: {_NEGRO};"
+            f" color: {_GRIS_CLR};"
+            f" border: 1px solid {_GRIS_MED};"
+            " border-radius: 4px;"
+            f" font-family: {_FAM_MONO};"
+            " font-size: 12px;"
+            "}"
+        )
+        self._log_edit.setMinimumHeight(120)
+        log_v.addWidget(self._log_edit)
+        root.addWidget(log_box)
+
         # ── Suscripción ROS a /joint_states (si hay nodo ROS) ──────────
         if self._ros_node is not None:
             self._setup_ros()
@@ -399,6 +440,7 @@ class MainWindow(QMainWindow):
         self.btn_p3.clicked.connect(lambda: self._on_punto("P3"))
         self.btn_run.clicked.connect(self._on_run)
         self.btn_stop.clicked.connect(self._on_stop)
+        self._btn_log_clear.clicked.connect(self._clear_log)
 
         # ── Dimensionado: generoso y nunca menor que el contenido ─────
         self.adjustSize()
@@ -410,6 +452,7 @@ class MainWindow(QMainWindow):
     # ── ROS 2: suscripción a /joint_states + estado del controller ────
     def _setup_ros(self) -> None:
         """Crea la suscripción, el client de list_controllers y los QTimers."""
+        self._log("ok", "Sistema iniciado (ROS listo)")
         self._joint_states_sub = self._ros_node.create_subscription(
             _JOINT_STATES_MSG,
             _JOINT_STATES_TOPIC,
@@ -423,6 +466,7 @@ class MainWindow(QMainWindow):
         self._ros_node.get_logger().info(
             f"Suscrito a {_JOINT_STATES_TOPIC} ({_JOINT_STATES_MSG.__name__})."
         )
+        self._log("info", f"Suscrito a {_JOINT_STATES_TOPIC}")
 
         # Estado del joint_trajectory_controller (list_controllers).
         self._list_controllers_client = self._ros_node.create_client(
@@ -434,7 +478,7 @@ class MainWindow(QMainWindow):
         self._status_timer.start()
         self._poll_controller_status()  # consulta inmediata inicial
 
-        # Acción del joint_trajectory_controller (HOME y P1-P3; async, no bloquea).
+        # Acción del joint_trajectory_controller (HOME, P1-P3 y trayectoria; async).
         self._action_client = ActionClient(
             self._ros_node, _HOME_MSG, _HOME_ACTION
         )
@@ -555,6 +599,7 @@ class MainWindow(QMainWindow):
             f"{accion}: switch_controller "
             f"{'activate' if activate else 'deactivate'} {_JTC_CONTROLLER_NAME}..."
         )
+        self._log("info", f"{accion}: solicitando switch_controller...")
         try:
             future = self._switch_controller_client.call_async(request)
             future.add_done_callback(
@@ -583,18 +628,21 @@ class MainWindow(QMainWindow):
                 f"{accion}: {'OK' if ok else 'FALLÓ'} ({message})"
             )
         if ok:
+            self._log("ok", f"{accion}: OK ({message})")
             if accion == "ENABLE":
                 self._set_status("● HABILITADO", _VERDE)
             else:
                 self._set_status("● DESHABILITADO", _ROJO)
             self._poll_controller_status()  # confirmar con el estado real
         else:
+            self._log("error", f"{accion}: FALLÓ ({message})")
             self._set_status(f"● {accion} FALLÓ: {message}", _ROJO)
 
     # ── Movimiento HOME + P1-P3 (Goal único, asíncrono, común) ─────────
     def _on_home(self):
         """Envía el robot a la posición cero (HOME) sin bloquear la GUI."""
         if self._motion_active:
+            self._log("info", "HOME: movimiento en curso, acción ignorada")
             return
         if (
             self._ros_node is None
@@ -605,7 +653,7 @@ class MainWindow(QMainWindow):
             return
 
         goal = self._build_single_goal(_HOME_POSITIONS, _HOME_DURATION_S)
-        self._run_single_goal(
+        self._run_goal(
             goal=goal,
             button=self.btn_home,
             moving_text="MOVIENDO A HOME...",
@@ -616,11 +664,13 @@ class MainWindow(QMainWindow):
     def _on_punto(self, name: str):
         """Envía un único waypoint P1/P2/P3 (IK ya resuelta en el arranque)."""
         if self._motion_active:
+            self._log("info", f"{name}: movimiento en curso, acción ignorada")
             return
         if self._ros_node is None or self._action_client is None:
             print(f"[GUI] {name} presionado (sin ROS: placeholder)")
             return
         if not self._point_ready:
+            self._log("error", f"{name}: viajar no disponible (carga de plan fallida)")
             self._set_status(
                 f"● {name}: NO DISPONIBLE (carga de trayectoria fallida)", _ROJO
             )
@@ -641,7 +691,7 @@ class MainWindow(QMainWindow):
             return
 
         goal = self._build_single_goal(q, _POINT_DURATION_S)
-        self._run_single_goal(
+        self._run_goal(
             goal=goal,
             button=btn,
             moving_text=f"MOVIENDO A {name}...",
@@ -649,7 +699,7 @@ class MainWindow(QMainWindow):
             tag=name,
         )
 
-    def _run_single_goal(
+    def _run_goal(
         self,
         *,
         goal: FollowJointTrajectory.Goal,
@@ -658,7 +708,7 @@ class MainWindow(QMainWindow):
         ok_text: str,
         tag: str,
     ) -> None:
-        """Envío común HOME/P1-P3: comprueba el controller, envía y sigue.
+        """Envío común HOME/P1-P3/TRAYECTORIA: comprueba, envía y sigue.
 
         Comparte el flujo asíncrono (controller 'active' -> send_goal_async
         -> aceptado -> get_result_async -> resultado real) y garantiza que
@@ -678,6 +728,7 @@ class MainWindow(QMainWindow):
         self._motion_button = button
         button.setEnabled(False)  # evita goals simultáneos
         self._pause_status_poll()
+        self._log("info", f"{tag}: solicitando movimiento...")
         self._set_status(f"● {tag}: COMPROBANDO CONTROLLER...", _AZUL)
 
         # Antes de enviar: exigir joint_trajectory_controller 'active'.
@@ -714,6 +765,10 @@ class MainWindow(QMainWindow):
         tag: str,
     ) -> None:
         """Solo envía el goal si joint_trajectory_controller está 'active'."""
+        if self._stop_requested:
+            self._log("warning", f"{tag}: STOP antes de enviar el goal")
+            self._finish_motion("● MOVIMIENTO DETENIDO (goal no enviado)", _AMARILLO)
+            return
         try:
             response = future.result()
         except Exception as exc:  # noqa: BLE001 - no romper la GUI
@@ -726,6 +781,7 @@ class MainWindow(QMainWindow):
                 estado = ctrl.state
                 break
         if estado != "active":
+            self._log("error", f"{tag}: controller {estado or 'NO ENCONTRADO'}")
             self._finish_motion(
                 f"● {tag}: CONTROLLER {estado or 'NO ENCONTRADO'} (se requiere active)",
                 _ROJO,
@@ -752,7 +808,7 @@ class MainWindow(QMainWindow):
     def _build_single_goal(
         self, positions, duration_s: float
     ) -> FollowJointTrajectory.Goal:
-        """Goal de un solo waypoint: trayectoria + tolerancias (igual que antes)."""
+        """Goal de un solo waypoint: trayectoria + tolerancias (como antes)."""
         point = JointTrajectoryPoint()
         point.positions = [float(v) for v in positions]
         point.time_from_start = Duration(seconds=duration_s).to_msg()
@@ -763,6 +819,18 @@ class MainWindow(QMainWindow):
 
         goal = FollowJointTrajectory.Goal()
         goal.trajectory = trajectory
+        self._fill_goal_tolerances(goal)
+        return goal
+
+    def _build_trajectory_goal(self) -> FollowJointTrajectory.Goal:
+        """Goal multi-waypoint reutilizando plan.trajectory (sin rehacer IK)."""
+        goal = FollowJointTrajectory.Goal()
+        goal.trajectory = self._point_plan.trajectory
+        self._fill_goal_tolerances(goal)
+        return goal
+
+    def _fill_goal_tolerances(self, goal: FollowJointTrajectory.Goal) -> None:
+        """Aplica las tolerancias del goal (mismas que staubli_trajectory)."""
         for name in _HOME_JOINT_NAMES:
             tol = JointTolerance()
             tol.name = name
@@ -773,7 +841,6 @@ class MainWindow(QMainWindow):
         goal.goal_time_tolerance = Duration(
             seconds=_HOME_GOAL_TIME_TOL_S
         ).to_msg()
-        return goal
 
     def _on_motion_goal_response(self, future, *, button, ok_text: str, tag: str):
         """El controller acepta/rechaza el goal; espera el resultado real."""
@@ -783,10 +850,12 @@ class MainWindow(QMainWindow):
             self._finish_motion(f"● {tag}: ERROR AL ENVIAR ({exc})", _ROJO)
             return
         if not goal_handle.accepted:
+            self._log("error", f"{tag}: goal RECHAZADO")
             self._finish_motion(f"● {tag}: GOAL RECHAZADO", _ROJO)
             return
 
         self._motion_goal_handle = goal_handle
+        self._log("info", f"{tag}: goal ACEPTADO")
         self._ros_node.get_logger().info(
             f"{tag}: goal ACEPTADO; esperando resultado de ejecución."
         )
@@ -796,26 +865,54 @@ class MainWindow(QMainWindow):
         )
 
     def _on_motion_result(self, future, *, ok_text: str, tag: str) -> None:
-        """Comprueba el estado final del goal (no basta con haberlo enviado)."""
+        """Comprueba el estado final del goal (no basta con haberlo enviado).
+
+        Nota: joint_trajectory_controller informa SUCCESSFUL al cancelar; por
+        eso se comprueba primero _stop_requested (STOP/cancelación).
+        """
+        if not self._motion_active:
+            return  # resultado de un goal ya cerrado (doble callback)
         try:
             wrapped = future.result()
             error_code = getattr(wrapped.result, "error_code", None)
+            error_string = getattr(wrapped.result, "error_string", None) or ""
         except Exception as exc:  # noqa: BLE001 - no romper la GUI
+            self._log("error", f"{tag}: error al leer el resultado ({exc})")
             self._finish_motion(f"● {tag}: ERROR ({exc})", _ROJO)
             return
 
+        if self._stop_requested:
+            self._log("warning", f"{tag}: goal cancelado por STOP")
+            self._finish_motion("● MOVIMIENTO DETENIDO", _AMARILLO)
+            return
+
         if error_code == _HOME_MSG.Result.SUCCESSFUL:
+            self._log("ok", f"{tag}: {ok_text}")
             self._finish_motion(f"● {ok_text}", _VERDE)
-        else:
-            nombre = _HOME_RESULT_CODES.get(
-                error_code, f"desconocido ({error_code})"
+            return
+
+        nombre = _HOME_RESULT_CODES.get(error_code, f"desconocido ({error_code})")
+        if (
+            error_code == _HOME_MSG.Result.INVALID_GOAL
+            and "deactivate" in error_string.lower()
+        ):
+            self._log(
+                "warning",
+                f"{tag}: detenido (joint_trajectory_controller desactivado)",
             )
-            self._finish_motion(f"● {tag} FALLÓ: {nombre}", _ROJO)
+            self._finish_motion(
+                "● MOVIMIENTO DETENIDO (controller desactivado)", _AMARILLO
+            )
+            return
+        detalle = f"{nombre}" + (f" — {error_string}" if error_string else "")
+        self._log("error", f"{tag}: goal FALLÓ ({detalle})")
+        self._finish_motion(f"● {tag} FALLÓ: {nombre}", _ROJO)
 
     def _finish_motion(self, status_text: str, color: str) -> None:
         """Restaura botón y sondeo de estado al terminar (o fallar) un goal."""
         self._motion_active = False
         self._motion_goal_handle = None
+        self._stop_requested = False
         if self._motion_button is not None:
             self._motion_button.setEnabled(True)
             self._motion_button = None
@@ -853,6 +950,7 @@ class MainWindow(QMainWindow):
             plan = TrajectoryBuilder(config).build()
         except Exception as exc:  # noqa: BLE001 - no cerrar la GUI
             self._ros_node.get_logger().error(f"P1-P3 no disponibles: {exc}")
+            self._log("error", f"Plan no disponible: {exc}")
             self._set_status("● P1-P3 NO DISPONIBLES (carga fallida)", _ROJO)
             self._set_points_enabled(False)
             return
@@ -861,6 +959,7 @@ class MainWindow(QMainWindow):
             self._ros_node.get_logger().error(
                 "P1-P3 no disponibles: IK sin solución o fuera de límites."
             )
+            self._log("error", "Plan no disponible: IK sin solución o fuera de límites")
             self._set_status("● P1-P3 NO DISPONIBLES (IK no resuelta)", _ROJO)
             self._set_points_enabled(False)
             return
@@ -873,24 +972,115 @@ class MainWindow(QMainWindow):
         self._point_qs = qs
         self._point_ready = True
         self._set_points_enabled(True)
+        self._log("ok", f"Plan cargado: {len(plan.records)} waypoints")
         self._ros_node.get_logger().info(
             "P1-P3 listos: waypoints resueltos desde points.yaml "
             f"({[r.name for r in plan.records]})."
         )
 
     def _set_points_enabled(self, enabled: bool) -> None:
-        """Habilita/deshabilita los botones P1-P3."""
+        """Habilita/deshabilita P1-P3 y EJECUTAR TRAYECTORIA."""
         for attr in _POINT_BTN_ATTR.values():
             btn = getattr(self, attr, None)
             if btn is not None:
                 btn.setEnabled(enabled)
+        self.btn_run.setEnabled(enabled)
 
+    # ── EJECUTAR TRAYECTORIA (reutiliza plan.trajectory) ─────────────────
     def _on_run(self):
-        print("[GUI] EJECUTAR TRAYECTORIA presionado")
+        """Envía la trayectoria completa (P1->P2->P3->HOME) como goal multi-waypoint."""
+        if self._motion_active:
+            self._log("info", "EJECUTAR TRAYECTORIA: movimiento en curso, ignorado")
+            return
+        if (
+            self._ros_node is None
+            or self._action_client is None
+            or self._list_controllers_client is None
+        ):
+            print("[GUI] EJECUTAR TRAYECTORIA presionado (sin ROS: placeholder)")
+            return
+        if not self._point_ready:
+            self._log("error", "TRAYECTORIA NO DISPONIBLE (carga de plan fallida)")
+            self._set_status("● TRAYECTORIA NO DISPONIBLE (carga fallida)", _ROJO)
+            return
 
+        goal = self._build_trajectory_goal()
+        self._run_goal(
+            goal=goal,
+            button=self.btn_run,
+            moving_text="EJECUTANDO TRAYECTORIA...",
+            ok_text="TRAYECTORIA COMPLETADA",
+            tag="TRAYECTORIA",
+        )
+
+    # ── STOP (cancelación del goal activo; el controller sigue 'active') ─
     def _on_stop(self):
-        self._set_status("● PARO DE EMERGENCIA", _ROJO_CLARO)
-        print("[GUI] STOP presionado")
+        """Detiene el movimiento en curso cancelando el goal de la acción."""
+        if not self._motion_active:
+            self._set_status("● SIN MOVIMIENTO EN CURSO", _GRIS_CLR)
+            self._log("info", "STOP: no hay movimiento en curso")
+            return
+        self._stop_requested = True
+        if self._motion_goal_handle is None:
+            # El goal aún no se envió (comprobando controller): aborta el envío.
+            self._set_status("● DETENIENDO (antes de enviar)...", _AZUL)
+            self._log("warning", "STOP: cancelando envío pendiente")
+            return
+        self._set_status("● DETENIENDO MOVIMIENTO...", _AZUL)
+        self._log("warning", "STOP: cancelando goal activo")
+        try:
+            future = self._motion_goal_handle.cancel_goal_async()
+            future.add_done_callback(self._on_cancel_response)
+        except Exception as exc:  # noqa: BLE001 - no romper la GUI
+            self._log("error", f"STOP: no se pudo cancelar ({exc})")
+            self._stop_requested = False
+
+    def _on_cancel_response(self, future) -> None:
+        """Interpreta la respuesta del servicio de cancelación (action_msgs)."""
+        try:
+            response = future.result()
+        except Exception as exc:  # noqa: BLE001 - no romper la GUI
+            self._log("error", f"STOP: error en cancelación ({exc})")
+            return
+        code = response.return_code
+        if code == CancelGoal.Response.ERROR_NONE:
+            self._log("info", "STOP: cancelación aceptada")
+        elif code == CancelGoal.Response.ERROR_REJECTED:
+            self._log("warning", "STOP: cancelación rechazada (¿ya terminó?)")
+            self._stop_requested = False
+        elif code == CancelGoal.Response.ERROR_UNKNOWN_GOAL_ID:
+            self._log("warning", "STOP: goal desconocido (¿ya terminó?)")
+            self._stop_requested = False
+        else:  # ERROR_GOAL_TERMINATED
+            self._log("warning", "STOP: el goal ya había terminado")
+            self._stop_requested = False
+
+    # ── Panel de mensajes ──────────────────────────────────────────────
+    def _log(self, level: str, text: str) -> None:
+        """Añade una línea al panel de mensajes con color y timestamp."""
+        editor = getattr(self, "_log_edit", None)
+        if editor is None:
+            return
+        color = {
+            "info": _GRIS_CLR,
+            "ok": _VERDE,
+            "warning": _AMARILLO,
+            "error": _ROJO_CLARO,
+        }.get(level, _GRIS_CLR)
+        symbol = {"info": "·", "ok": "✓", "warning": "⚠", "error": "✗"}.get(level, "·")
+        stamp = time.strftime("%H:%M:%S")
+        cursor = editor.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        fmt = QTextCharFormat()
+        fmt.setForeground(QColor(color))
+        cursor.insertText(f"{stamp} {symbol} {text}\n", fmt)
+        editor.setTextCursor(cursor)
+        editor.ensureCursorVisible()
+
+    def _clear_log(self) -> None:
+        """Vacía el panel de mensajes."""
+        self._log_edit.clear()
+        self._log("info", "registro limpiado")
 
 
 # ────────────────────────────────────────────────────────────────────────
