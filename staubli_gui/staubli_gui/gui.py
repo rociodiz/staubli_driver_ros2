@@ -19,6 +19,14 @@ que ejecuta rclpy.spin_once(...) periódicamente. ENABLE/DISABLE, HOME,
 P1-P3, EJECUTAR TRAYECTORIA (reutiliza plan.trajectory) y STOP (cancela el
 goal activo; el controller permanece 'active') están implementados; el
 panel "Mensajes" refleja en tiempo real los eventos del sistema.
+
+   Cámara eye-in-hand: suscripción directa a /camera/image_raw
+   (sensor_msgs/msg/Image, QoS sensor_data) y conversión de canal
+   'rgb8' a QImage (QtGui, sin OpenCV/cv_bridge/numpy). El callback ROS
+   corre en el hilo de eventos de Qt (spin_once desde QTimer), así que
+   actualiza el visor directamente. La imagen se escala con Qt manteniendo
+   la relación de aspecto; solo se re-escala cuando cambia el tamaño del
+   visor (no en cada frame), para no penalizar el spin a 30 Hz.
 """
 
 import sys
@@ -37,11 +45,12 @@ from rclpy.qos import (
     HistoryPolicy,
     QoSProfile,
     ReliabilityPolicy,
+    qos_profile_sensor_data,
 )
-from sensor_msgs.msg import JointState
+from sensor_msgs.msg import Image, JointState
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QTextCharFormat, QTextCursor
+from PySide6.QtCore import QSize, Qt, QTimer
+from PySide6.QtGui import QColor, QFont, QImage, QPixmap, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -99,6 +108,15 @@ _JOINT_STATES_QOS = QoSProfile(
 
 # Frecuencia del QTimer que integra el bucle ROS con Qt (spin_once).
 _ROS_SPIN_MS = 33  # ~30 Hz (no bloquea la GUI)
+
+# ── ROS 2 (cámara eye-in-hand, fase 3: visor de vídeo) ───────────────
+# El bridge (launch_gazebo.launch.py) publica /camera/image_raw como
+# sensor_msgs/msg/Image. QoS sensor_data (BEST_EFFORT, VOLATILE): compatible
+# con ros_gz_bridge y sin acumular frames si el visor va más lento.
+_CAMERA_TOPIC = "/camera/image_raw"
+_CAMERA_MSG = Image
+_CAMERA_QOS = qos_profile_sensor_data
+_CAMERA_RGB8 = "rgb8"  # el sensor gz publica R8G8B8 -> 'rgb8' (sin cv_bridge)
 
 # ─── ROS 2 (fase 2: indicador de estado HABILITADO/DESHABILITADO) ─────
 # Consulta periódica del estado del joint_trajectory_controller mediante
@@ -252,6 +270,47 @@ def _separator() -> QFrame:
     return line
 
 
+# ─── Visor de vídeo ────────────────────────────────────────────────────
+class CameraView(QLabel):
+    """Etiqueta que muestra un QImage escalado manteniendo la relación de
+    aspecto dentro del espacio disponible del widget.
+
+    Cada frame entrante se re-escala (Qt.KeepAspectRatio + SmoothTransformation)
+    y actualiza el QPixmap; la geometría objetivo solo se recalcula cuando
+    cambia el tamaño del visor, no en cada frame.
+    """
+
+    def __init__(self, placeholder: str = "Sin imagen") -> None:
+        super().__init__(placeholder)
+        self._frame: QImage | None = None
+        self._scaled_size: tuple[int, int] | None = None
+
+    def set_frame(self, image: QImage) -> None:
+        """Reemplaza el frame actual y actualiza el visor con el nuevo frame."""
+        self._frame = image
+        self._render()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - firma de Qt
+        super().resizeEvent(event)
+        self._render()
+
+    def _render(self) -> None:
+        if self._frame is None or self._frame.isNull():
+            return
+        size = (self.width(), self.height())
+        if size[0] <= 0 or size[1] <= 0:
+            return
+        # Solo se recalcula la geometría objetivo si cambió el tamaño del visor.
+        if size != self._scaled_size:
+            self._scaled_size = size
+        scaled = self._frame.scaled(
+            QSize(self._scaled_size[0], self._scaled_size[1]),
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
+        )
+        self.setPixmap(QPixmap.fromImage(scaled))
+
+
 # ─── Ventana principal ──────────────────────────────────────────────────
 class MainWindow(QMainWindow):
     """Ventana principal de control del robot Staubli TX2-60L."""
@@ -282,6 +341,9 @@ class MainWindow(QMainWindow):
         self._user_trajectory: list[str] = []  # nombres de UserPoint en orden
         self._joints_now: dict | None = None  # última lectura /joint_states
         self._user_kinematics = None
+        self._camera_sub = None  # suscripción a /camera/image_raw
+        self._camera_view: CameraView | None = None  # visor de vídeo
+        self._warned_encoding: str | None = None  # encoding ignorado (1 aviso)
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -489,6 +551,24 @@ class MainWindow(QMainWindow):
             grid.addWidget(lbl_val,  row, col * 2 + 1)
         row_mid.addWidget(jnt_box, 2)
 
+        # ── Cámara (visión eye-in-hand, visión en tiempo real) ───────
+        cam_box = _make_box("Cámara")
+        cam_v = QVBoxLayout(cam_box)
+        cam_v.setContentsMargins(4, 4, 4, 4)
+        self._camera_view = CameraView(
+            "Cámara: sin imagen\n(esperando /camera/image_raw)"
+        )
+        self._camera_view.setAlignment(Qt.AlignCenter)
+        self._camera_view.setWordWrap(True)
+        self._camera_view.setStyleSheet(
+            f"background-color: {_NEGRO}; border-radius: 4px;"
+            f" color: {_GRIS_CLR};"
+            f" font-family: {_FAMILIA}; font-size: 12px;"
+        )
+        self._camera_view.setMinimumSize(200, 120)
+        cam_v.addWidget(self._camera_view)
+        row_mid.addWidget(cam_box, 3)
+
         root.addLayout(row_mid)
 
         # ── STOP ──────────────────────────────────────────────────────
@@ -601,6 +681,19 @@ class MainWindow(QMainWindow):
         )
         self._log("info", f"Suscrito a {_JOINT_STATES_TOPIC}")
 
+        # Cámara eye-in-hand: suscripción directa a /camera/image_raw.
+        if self._camera_view is not None:
+            self._camera_sub = self._ros_node.create_subscription(
+                _CAMERA_MSG,
+                _CAMERA_TOPIC,
+                self._on_camera_image,
+                _CAMERA_QOS,
+            )
+            self._ros_node.get_logger().info(
+                f"Suscrito a {_CAMERA_TOPIC} ({_CAMERA_MSG.__name__})."
+            )
+            self._log("info", f"Suscrito a {_CAMERA_TOPIC}")
+
         # Estado del joint_trajectory_controller (list_controllers).
         self._list_controllers_client = self._ros_node.create_client(
             _LIST_CONTROLLERS_SRV, _LIST_CONTROLLERS_SERVICE
@@ -639,6 +732,41 @@ class MainWindow(QMainWindow):
         for ros_name, gui_key in _ROS_JOINT_MAP.items():
             if ros_name in positions:
                 self._joint_labels[gui_key].setText(f"{positions[ros_name]:.4f}")
+
+    def _on_camera_image(self, msg: Image) -> None:
+        """Convierte sensor_msgs/Image ('rgb8') a QImage y actualiza el visor.
+
+        El callback se ejecuta en el hilo de la GUI (spin_once desde el
+        QTimer), por lo que tocar widgets Qt aquí es seguro.
+        """
+        if self._camera_view is None:
+            return
+        if msg.encoding != _CAMERA_RGB8:
+            if msg.encoding != self._warned_encoding:
+                self._warned_encoding = msg.encoding
+                self._log(
+                    "warning",
+                    f"Cámara: encoding '{msg.encoding}' no soportado (solo 'rgb8')",
+                )
+                self._ros_node.get_logger().warning(
+                    f"/camera/image_raw usa '{msg.encoding}'; se espera "
+                    f"'{_CAMERA_RGB8}'. Visor no actualizado."
+                )
+            return
+        try:
+            image = QImage(
+                bytearray(msg.data),
+                msg.width,
+                msg.height,
+                msg.step,
+                QImage.Format_RGB888,
+            ).copy()  # copia propia (desligada del buffer ROS del mensaje)
+        except Exception as exc:  # noqa: BLE001 - no romper la GUI
+            self._ros_node.get_logger().error(
+                f"Fallo al convertir /camera/image_raw: {exc}"
+            )
+            return
+        self._camera_view.set_frame(image)
 
     # ── ROS 2: estado del joint_trajectory_controller ─────────────────
     def _poll_controller_status(self) -> None:
