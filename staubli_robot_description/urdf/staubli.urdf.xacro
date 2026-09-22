@@ -54,6 +54,7 @@
 
     <!-- Staubli robot description -->
     <xacro:include filename="$(find staubli_robot_description)/urdf/staubli_macro.xacro" />
+    <xacro:include filename="$(find staubli_robot_description)/urdf/include/staubli_camera.xacro" />
     <xacro:staubli_robot
         name="$(arg name)"
         robot_prefix="$(arg robot_prefix)"
@@ -73,6 +74,12 @@
     >
         <origin xyz="0 0 0" rpy="0 0 0"/>
     </xacro:staubli_robot>
+
+    <!-- Eye-in-hand RGB camera on link_6 (same Z as tool0). -->
+    <xacro:staubli_camera
+        robot_prefix="$(arg robot_prefix)"
+        parent_link="$(arg robot_prefix)link_6"
+    />
 
     <!-- ROS2 control description -->
     <xacro:include filename="$(find staubli_robot_description)/r2c/staubli.r2c.xacro" />

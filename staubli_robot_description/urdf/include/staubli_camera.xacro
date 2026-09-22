@@ -1,0 +1,83 @@
+<?xml version="1.0"?>
+<!-- |                         Staubli eye-in-hand RGB camera                     | -->
+<!-- |                                                                           | -->
+<!-- | Eye-in-hand camera mounted on link_6 of the TX2-60L (same Z as tool0).    | -->
+<!-- |                                                                           | -->
+<!-- | Orientation: in Gazebo Sim the camera optical axis is the local -Z axis.  | -->
+<!-- | At home the wrist (link_6) is world aligned, so a plain +X roll keeps the | -->
+<!-- | -Z pointing down into the robot. The fixed joint rpy (0.7031 0 0) instead | -->
+<!-- | rolls the camera so its -Z aims outward and slightly down, framing the    | -->
+<!-- | inspection table / workpiece (part_1) seen from the roof. Only the look   | -->
+<!-- | direction changes; the mount pose and tool0 are untouched.                | -->
+<!-- |                                                                           | -->
+<!-- | The camera link / fixed joint make camera_link part of the robot TF tree. | -->
+<!-- | The gazebo block (reference camera_link) embeds a Gazebo Sim camera       | -->
+<!-- | sensor: when gz-sim spawns the robot from the URDF, it is converted into  | -->
+<!-- | an SDF camera sensor on link camera_link of the model. The sensor         | -->
+<!-- | publishes the image on the Gazebo topic /camera/image_raw, which the      | -->
+<!-- | launch_gazebo.launch.py bridges to the ROS topic /camera/image_raw.       | -->
+<!-- =========================================================================== -->
+
+<robot xmlns:xacro="http://wiki.ros.org/xacro">
+
+    <xacro:macro name="staubli_camera" params="
+        robot_prefix:=''
+        parent_link
+        xyz:='0 0 0.07'
+        rpy:='2.9391 -1.3969 -2.9714'
+        update_rate:=30
+        width:=640
+        height:=480
+        hfov:=1.0472
+    ">
+        <!-- Camera mount link (eye-in-hand) -->
+
+        <link name="${robot_prefix}camera_link">
+            <inertial>
+                <mass value="0.05"/>
+                <inertia
+                    ixx="1.0e-5" ixy="0.0" ixz="0.0"
+                    iyy="1.0e-5" iyz="0.0" izz="1.0e-5"/>
+            </inertial>
+            <visual name="camera_visual">
+                <geometry>
+                    <box size="0.04 0.04 0.04"/>
+                </geometry>
+                <material name="camera_material">
+                    <color rgba="0.15 0.15 0.15 1"/>
+                </material>
+            </visual>
+        </link>
+
+        <joint name="${robot_prefix}camera_fixed_joint" type="fixed">
+            <parent link="${parent_link}"/>
+            <child link="${robot_prefix}camera_link"/>
+            <origin xyz="${xyz}" rpy="${rpy}"/>
+        </joint>
+
+        <!-- Gazebo Sim RGB camera sensor (simple configuration, no depth). -->
+
+        <gazebo reference="${robot_prefix}camera_link">
+            <sensor name="camera" type="camera">
+                <topic>/camera/image_raw</topic>
+                <update_rate>${update_rate}</update_rate>
+                <always_on>1</always_on>
+                <visualize>true</visualize>
+                <camera>
+                    <horizontal_fov>${hfov}</horizontal_fov>
+                    <image>
+                        <width>${width}</width>
+                        <height>${height}</height>
+                        <format>R8G8B8</format>
+                    </image>
+                    <clip>
+                        <near>0.1</near>
+                        <far>100</far>
+                    </clip>
+                </camera>
+            </sensor>
+        </gazebo>
+
+    </xacro:macro>
+
+</robot>

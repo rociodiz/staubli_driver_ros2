@@ -171,6 +171,18 @@ def generate_launch_description():
         output="screen",
     )
 
+    # --- Camera bridge (/camera/image_raw gz→ROS) ---
+    # The eye-in-hand RGB camera sensor (see staubli_camera.xacro) publishes
+    # the Gazebo topic /camera/image_raw. Forward it to the ROS 2 topic
+    # /camera/image_raw as sensor_msgs/msg/Image.
+
+    camera_image_bridge = Node(
+        package="ros_gz_bridge",
+        executable="parameter_bridge",
+        arguments=["/camera/image_raw@sensor_msgs/msg/Image[gz.msgs.Image"],
+        output="screen",
+    )
+
     # --- Controller spawners ---
     # The gz_ros2_control plugin creates the controller_manager node at
     # /controller_manager (default controller_manager_name and namespace "/").
@@ -233,6 +245,7 @@ def generate_launch_description():
             robot_state_publisher_node,
             gz_server,
             clock_bridge,
+            camera_image_bridge,
             spawn_robot,
             load_joint_state_broadcaster,
             load_joint_trajectory_controller,
