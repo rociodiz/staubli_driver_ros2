@@ -215,6 +215,18 @@ def generate_launch_description():
         output="screen",
     )
 
+    load_forward_velocity_controller = Node(
+        package="controller_manager",
+        executable="spawner",
+        arguments=[
+            "forward_velocity_controller",
+            "-c", "/controller_manager",
+            "--controller-manager-timeout", "30",
+            "--param-file", controllers_yaml,
+        ],
+        output="screen",
+    )
+
     # --- Gazebo GUI (optional) ---
 
     gz_gui = ExecuteProcess(
@@ -249,6 +261,7 @@ def generate_launch_description():
             spawn_robot,
             load_joint_state_broadcaster,
             load_joint_trajectory_controller,
+            load_forward_velocity_controller,
             gz_gui,
         ]
     )

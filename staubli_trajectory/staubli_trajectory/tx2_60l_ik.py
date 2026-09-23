@@ -94,11 +94,14 @@ def load_tx2_60l_geometry(
     List[Tuple[float, float, float]],
     Tuple[float, float, float],
     List[Tuple[float, float]],
+    List[float],
 ]:
     """Lee la geometría del TX2-60L de los YAML del repositorio.
 
     Devuelve (nombres_articulaciones, origenes_xyz, ejes_axis, tool0_xyz,
-    limites_rad) con datos IDÉNTICOS a los del paquete de descripción.
+    limites_rad, limites_velocidad_rad_s) con datos IDÉNTICOS a los del
+    paquete de descripción. Los límites de velocidad (max_velocity, en
+    °/s en el YAML) se convierten a rad/s mediante el tag !degrees.
     """
     config_dir = config_dir or find_tx2_60l_config_dir()
 
@@ -123,13 +126,17 @@ def load_tx2_60l_geometry(
         (float(limits[n]["min_position"]), float(limits[n]["max_position"]))
         for n in names
     ]
-    return names, origins, axes, tool0_xyz, lim
+    vel_lim = [float(limits[n]["max_velocity"]) for n in names]
+    return names, origins, axes, tool0_xyz, lim, vel_lim
 
 
 # La geometría se carga una sola vez en import (fuente única de verdad).
-_TX2_60L_NAMES, _TX2_60L_ORIGINS, _TX2_60L_AXES, _TOOL0_OFFSET, _JOINT_LIMITS_RAD = (
+_TX2_60L_NAMES, _TX2_60L_ORIGINS, _TX2_60L_AXES, _TOOL0_OFFSET, _JOINT_LIMITS_RAD, _JOINT_VELOCITY_LIMITS_RAD = (
     load_tx2_60l_geometry()
 )
+
+# Límites de velocidad articulares (rad/s) leídos de joint_limits.yaml.
+JOINT_VELOCITY_LIMITS_RAD = list(_JOINT_VELOCITY_LIMITS_RAD)
 
 # Tolerancias de validación del solver.
 _IK_POS_EPS = 1.0e-4   # m
@@ -166,6 +173,7 @@ class Tx260lKinematics:
         self.joint_names = list(_TX2_60L_NAMES)
         self._chain = self._build_chain()
         self._fk = kdl.ChainFkSolverPos_recursive(self._chain)
+        self._jac = kdl.ChainJntToJacSolver(self._chain)
         self._ik = kdl.ChainIkSolverPos_LMA(self._chain, 1.0e-6, 500)
         self._rng = np.random.default_rng(random_seed)
         self._n_random_seeds = n_random_seeds
@@ -192,6 +200,25 @@ class Tx260lKinematics:
         frame = kdl.Frame()
         self._fk.JntToCart(jnt, frame)
         return frame
+
+    # ------------------------------------------------------------------
+    def jacobian(self, q: Sequence[float]) -> np.ndarray:
+        """Jacobiano 6x6 de tool0 respecto a base_link.
+
+        Filas: [vx, vy, vz, wx, wy, wz] (velocidad lineal y angular de
+        tool0, expresadas en base_link). Columnas: joint_1 ... joint_6
+        (orden de la cadena). Se resuelve con PyKDL.ChainJntToJacSolver
+        sobre la misma cadena usada en FK/IK (incluye el offset del TCP
+        tool0).
+        """
+        jnt = kdl.JntArray(6)
+        for i, v in enumerate(q):
+            jnt[i] = float(v)
+        jac = kdl.Jacobian(self._chain.getNrOfJoints())
+        if self._jac.JntToJac(jnt, jac) != 0:
+            raise RuntimeError("PyKDL: fallo al resolver JntToJac.")
+        cols = self._chain.getNrOfJoints()
+        return np.array([[jac[i, j] for j in range(cols)] for i in range(6)])
 
     # ------------------------------------------------------------------
     def inverse_kinematics(

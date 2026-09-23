@@ -1,0 +1,29 @@
+# Parámetros del nodo staubli_joystick_servo.
+# Valores iniciales CONSERVADORES para simulación.
+staubli_joystick_servo:
+  ros__parameters:
+    use_sim_time: true
+
+    # Frecuencia del bucle de control (Hz). Coincide con el update_rate del
+    # controller_manager (250 Hz).
+    control_rate: 250.0
+
+    # Timeouts de seguridad (s): si no llega /cmd_vel o /joint_states en este
+    # tiempo, se publican velocidades articulares CERO inmediatamente.
+    command_timeout: 0.2
+    joint_state_timeout: 0.2
+
+    # Resolución de q_dot = J^T (J J^T + lambda^2 I)^-1 Twist.
+    damping_lambda: 0.05
+    singularity_threshold: 0.02
+
+    # Límites cartesianos globales (base_link).
+    max_linear_speed: 0.15    # m/s
+    max_angular_speed: 0.5    # rad/s
+
+    # Rampa de aceleración/desaceleración articular (rad/s^2).
+    acceleration_limit: 1.5
+
+    # Deadzone por eje del Twist (lineal y angular).
+    deadzone_linear: 0.01
+    deadzone_angular: 0.01

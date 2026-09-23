@@ -27,6 +27,11 @@ panel "Mensajes" refleja en tiempo real los eventos del sistema.
    actualiza el visor directamente. La imagen se escala con Qt manteniendo
    la relación de aspecto; solo se re-escala cuando cambia el tamaño del
    visor (no en cada frame), para no penalizar el spin a 30 Hz.
+   4. Mando virtual (joystick): dos sticks (izq -> linear.x/y; der ->
+      angular.z/y), botones Z+/Z- (linear.z) y ganancia. Genera un Twist
+      normalizado que la GUI publica en /cmd_vel SOLO con el joystick
+      ACTIVADO (botón explícito); al desactivar envía un Twist=0. NUNCA
+      calcula IK ni velocidades articulares (lo hace el servo).
 """
 
 import sys
@@ -37,6 +42,7 @@ from action_msgs.srv import CancelGoal
 from control_msgs.action import FollowJointTrajectory
 from control_msgs.msg import JointTolerance
 from controller_manager_msgs.srv import ListControllers, SwitchController
+from geometry_msgs.msg import Twist
 from rclpy.action import ActionClient
 from rclpy.duration import Duration
 from rclpy.node import Node
@@ -68,6 +74,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .joystick_widgets import JoystickPanel
 from .user_points import UserPoint, UserPointStore, rpy_degrees_to_quaternion_xyzw
 
 
@@ -156,6 +163,15 @@ _HOME_RESULT_CODES = {
     _HOME_MSG.Result.PATH_TOLERANCE_VIOLATED: "PATH_TOLERANCE_VIOLATED",
     _HOME_MSG.Result.GOAL_TOLERANCE_VIOLATED: "GOAL_TOLERANCE_VIOLATED",
 }
+
+# ─── ROS 2 (joystick virtual, fase 4: publicación de /cmd_vel) ────────
+# La GUI publica geometry_msgs/Twist en /cmd_vel SOLO con el joystick
+# activado. El mando NO calcula IK ni velocidades articulares: ese trabajo
+# es de staubli_joystick_servo (Jacobi + DLS). QoS RELIABLE depth 10,
+# compatible con la suscripción del servo (default).
+_CMD_VEL_TOPIC = "/cmd_vel"
+_CMD_VEL_MSG = Twist
+_CMD_VEL_QOS_DEPTH = 10
 
 # ── Panel de mensajes ──────────────────────────────────────────────────
 _LOG_MAX_BLOCKS = 200  # log acotado (QPlainTextEdit descarta bloques viejos)
@@ -344,214 +360,59 @@ class MainWindow(QMainWindow):
         self._camera_sub = None  # suscripción a /camera/image_raw
         self._camera_view: CameraView | None = None  # visor de vídeo
         self._warned_encoding: str | None = None  # encoding ignorado (1 aviso)
+        self._cmd_vel_pub = None  # publisher de /cmd_vel (joystick virtual)
+        self._joystick_panel: JoystickPanel | None = None  # mando virtual
+        self._joystick_active = False  # solo se publica /cmd_vel si está activo
 
         central = QWidget()
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
-        root.setContentsMargins(12, 12, 12, 12)
-        root.setSpacing(8)
+        root.setContentsMargins(10, 8, 10, 8)
+        root.setSpacing(10)
 
-        # ── Título ────────────────────────────────────────────────────
+        # ── Título (cruza toda la ventana) ─────────────────────────────
         title = QLabel("Staubli TX2-60L")
         title.setAlignment(Qt.AlignCenter)
-        title.setFont(QFont("sans-serif", 16, QFont.Bold))
-        title.setStyleSheet(f"color: {_BLANCO}; padding: 2px;")
+        title.setFont(QFont("sans-serif", 15, QFont.Bold))
+        title.setStyleSheet(f"color: {_BLANCO}; padding: 0px;")
         root.addWidget(title)
 
-        # ── Fila superior: Estado + Control + Home / Referenciar ──────
-        row_top = QHBoxLayout()
-        row_top.setSpacing(8)
+        # ── Dos columnas principales (~50/50, apaisado) ────────────────
+        cols = QHBoxLayout()
+        cols.setSpacing(12)
+        root.addLayout(cols)
 
-        # ── Indicador de estado ───────────────────────────────────────
-        status_box = _make_box("Estado del robot")
-        hb = QHBoxLayout(status_box)
+        # Columna izquierda: control manual + visión.
+        left = QVBoxLayout()
+        left.setSpacing(10)
+        cols.addLayout(left, 1)
+
+        # Columna derecha: operación automática + estado.
+        right = QVBoxLayout()
+        right.setSpacing(10)
+        cols.addLayout(right, 1)
+
+        # ── Barra de control superior (compacta, altura fija) ─────────
+        top_box = _make_box("Control del robot")
+        top_box.setFixedHeight(58)
+        hb = QHBoxLayout(top_box)
+        hb.setContentsMargins(10, 2, 10, 4)
+        hb.setSpacing(12)
         self._status_label = QLabel("● DESHABILITADO")
-        self._status_label.setStyleSheet(
-            _label_style(_ROJO, _FAMILIA, 15)
-        )
+        self._status_label.setStyleSheet(_label_style(_ROJO, _FAMILIA, 13))
         self._status_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         hb.addWidget(self._status_label)
+        hb.addSpacing(18)
+        self.btn_enable = _make_btn("ENABLE", _btn_style(_VERDE, min_h=30))
+        self.btn_disable = _make_btn("DISABLE", _btn_style(_GRIS_MED, min_h=30))
+        hb.addWidget(self.btn_enable)
+        hb.addWidget(self.btn_disable)
         hb.addStretch()
-        row_top.addWidget(status_box, 3)
+        self.btn_home = _make_btn("HOME", _btn_style(_AZUL, min_w=110, min_h=30))
+        hb.addWidget(self.btn_home)
+        right.addWidget(top_box)
 
-        # ── ENABLE / DISABLE ─────────────────────────────────────────
-        ctrl_box = _make_box("Control")
-        hb2 = QHBoxLayout(ctrl_box)
-        self.btn_enable = _make_btn("ENABLE", _btn_style(_VERDE, min_h=40))
-        self.btn_disable = _make_btn("DISABLE", _btn_style(_GRIS_MED, min_h=40))
-        hb2.addWidget(self.btn_enable)
-        hb2.addWidget(self.btn_disable)
-        hb2.addStretch()
-        row_top.addWidget(ctrl_box, 2)
-
-        # ── HOME ──────────────────────────────────────────────────────
-        home_box = _make_box("Home / Referenciar")
-        hb3 = QHBoxLayout(home_box)
-        self.btn_home = _make_btn("HOME", _btn_style(_AZUL, min_w=100, min_h=40))
-        hb3.addStretch()
-        hb3.addWidget(self.btn_home)
-        hb3.addStretch()
-        row_top.addWidget(home_box, 1)
-
-        root.addLayout(row_top)
-
-        # ── Segunda zona: Puntos de inspección + Puntos del usuario ───
-        row_pts = QHBoxLayout()
-        row_pts.setSpacing(8)
-
-        # ── Puntos de inspección ──────────────────────────────────────
-        pts_box = _make_box("Puntos de inspección")
-        hb4 = QHBoxLayout(pts_box)
-        self.btn_p1 = _make_btn("P1", _btn_style(_GRIS_MED, min_w=64, min_h=40))
-        self.btn_p2 = _make_btn("P2", _btn_style(_GRIS_MED, min_w=64, min_h=40))
-        self.btn_p3 = _make_btn("P3", _btn_style(_GRIS_MED, min_w=64, min_h=40))
-        hb4.addStretch()
-        hb4.addWidget(self.btn_p1)
-        hb4.addWidget(self.btn_p2)
-        hb4.addWidget(self.btn_p3)
-        hb4.addStretch()
-        row_pts.addWidget(pts_box, 1)
-
-        # ── Puntos del usuario ────────────────────────────────────────
-        up_box = _make_box("Puntos del usuario")
-        up_v = QVBoxLayout(up_box)
-        up_v.setSpacing(6)
-        self._points_list = QListWidget()
-        self._points_list.setStyleSheet(
-            f"QListWidget {{ background-color: {_NEGRO}; color: {_BLANCO_HUESO};"
-            f" border: 1px solid {_GRIS_MED}; border-radius: 4px;"
-            f" font-family: {_FAM_MONO}; font-size: 12px; }}"
-            f"QListWidget::item {{ padding: 3px 6px; }}"
-            f"QListWidget::item:selected {{ background-color: {_AZUL}; }}"
-        )
-        self._points_list.setMinimumHeight(110)
-        up_v.addWidget(self._points_list)
-        up_btns = QHBoxLayout()
-        up_btns.setSpacing(6)
-        self.btn_new_point = _make_btn(
-            "NUEVO PUNTO", _btn_style(_AZUL, font_size=11, min_h=30, pad="4px 10px")
-        )
-        self.btn_edit_point = _make_btn(
-            "EDITAR", _btn_style(_GRIS_MED, font_size=11, min_h=30, pad="4px 10px")
-        )
-        self.btn_delete_point = _make_btn(
-            "ELIMINAR", _btn_style(_ROJO, font_size=11, min_h=30, pad="4px 10px")
-        )
-        self.btn_move_point = _make_btn(
-            "MOVER A PUNTO", _btn_style(_VERDE, font_size=11, min_h=30, pad="4px 10px")
-        )
-        self.btn_add_to_traj = _make_btn(
-            "AÑADIR A TRAYECTORIA",
-            _btn_style(_AZUL, font_size=11, min_h=30, pad="4px 10px"),
-        )
-        up_btns.addWidget(self.btn_new_point)
-        up_btns.addWidget(self.btn_edit_point)
-        up_btns.addWidget(self.btn_delete_point)
-        up_btns.addWidget(self.btn_move_point)
-        up_btns.addWidget(self.btn_add_to_traj)
-        up_v.addLayout(up_btns)
-        self.btn_edit_point.setEnabled(False)
-        self.btn_delete_point.setEnabled(False)
-        self.btn_move_point.setEnabled(False)
-        self.btn_add_to_traj.setEnabled(False)
-        row_pts.addWidget(up_box, 2)
-
-        root.addLayout(row_pts)
-
-        # ── Tercera zona: Trayectoria + Articulaciones ────────────────
-        row_mid = QHBoxLayout()
-        row_mid.setSpacing(8)
-
-        # ── Ejecutar trayectoria ──────────────────────────────────────
-        traj_box = _make_box("Trayectoria")
-        hb5 = QHBoxLayout(traj_box)
-        self.btn_run = _make_btn(
-            "EJECUTAR TRAYECTORIA",
-            _btn_style(_VERDE, font_size=14, min_w=240, min_h=44, pad="10px 24px"),
-        )
-        hb5.addStretch()
-        hb5.addWidget(self.btn_run)
-        hb5.addStretch()
-        row_mid.addWidget(traj_box, 1)
-
-        # ── Trayectoria definida por el usuario (orden editable) ──────
-        traj_user_box = _make_box("Trayectoria definida")
-        tuv = QVBoxLayout(traj_user_box)
-        tuv.setSpacing(6)
-        self._trajectory_list = QListWidget()
-        self._trajectory_list.setStyleSheet(
-            f"QListWidget {{ background-color: {_NEGRO}; color: {_BLANCO_HUESO};"
-            f" border: 1px solid {_GRIS_MED}; border-radius: 4px;"
-            f" font-family: {_FAM_MONO}; font-size: 12px; }}"
-            f"QListWidget::item {{ padding: 3px 6px; }}"
-            f"QListWidget::item:selected {{ background-color: {_AZUL}; }}"
-        )
-        self._trajectory_list.setMinimumHeight(110)
-        tuv.addWidget(self._trajectory_list)
-        tuv_btns = QHBoxLayout()
-        tuv_btns.setSpacing(6)
-        self.btn_traj_up = _make_btn(
-            "↑", _btn_style(_GRIS_MED, font_size=12, min_h=30, min_w=40, pad="2px 6px")
-        )
-        self.btn_traj_down = _make_btn(
-            "↓", _btn_style(_GRIS_MED, font_size=12, min_h=30, min_w=40, pad="2px 6px")
-        )
-        self.btn_traj_remove = _make_btn(
-            "QUITAR", _btn_style(_ROJO, font_size=11, min_h=30, pad="4px 10px")
-        )
-        self.btn_traj_clear = _make_btn(
-            "LIMPIAR", _btn_style(_GRIS_MED, font_size=11, min_h=30, pad="4px 10px")
-        )
-        tuv_btns.addWidget(self.btn_traj_up)
-        tuv_btns.addWidget(self.btn_traj_down)
-        tuv_btns.addWidget(self.btn_traj_remove)
-        tuv_btns.addWidget(self.btn_traj_clear)
-        tuv_btns.addStretch()
-        tuv.addLayout(tuv_btns)
-        self.btn_traj_up.setEnabled(False)
-        self.btn_traj_down.setEnabled(False)
-        self.btn_traj_remove.setEnabled(False)
-        self.btn_traj_clear.setEnabled(False)
-        row_mid.addWidget(traj_user_box, 2)
-
-        # ── Articulaciones J1-J6 ──────────────────────────────────────
-        jnt_box = _make_box("Articulaciones")
-        grid = QGridLayout(jnt_box)
-        grid.setHorizontalSpacing(12)
-        grid.setVerticalSpacing(8)
-        grid.setColumnStretch(0, 0)
-        grid.setColumnStretch(1, 1)
-        grid.setColumnStretch(2, 0)
-        grid.setColumnStretch(3, 1)
-        self._joint_labels: dict[str, QLabel] = {}
-        for idx, name in enumerate(self.JOINT_NAMES):
-            row, col = divmod(idx, 2)
-            lbl_name = QLabel(f"{name}:")
-            lbl_name.setStyleSheet(
-                _label_style(_BLANCO_HUESO, _FAM_MONO, 15, "min-width: 40px;")
-            )
-            lbl_name.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            lbl_val = QLabel("0.0000")
-            lbl_val.setStyleSheet(
-                _label_style(
-                    _AMARILLO_BRILLANTE, _FAM_MONO, 16,
-                    extra=(
-                        f"background-color: {_NEGRO};"
-                        f"border: 2px solid {_AMARILLO};"
-                        "border-radius: 4px;"
-                        "padding: 5px 10px;"
-                        "min-width: 120px;"
-                        "min-height: 30px;"
-                    ),
-                )
-            )
-            lbl_val.setAlignment(Qt.AlignCenter)
-            self._joint_labels[name] = lbl_val
-            grid.addWidget(lbl_name, row, col * 2)
-            grid.addWidget(lbl_val,  row, col * 2 + 1)
-        row_mid.addWidget(jnt_box, 2)
-
-        # ── Cámara (visión eye-in-hand, visión en tiempo real) ───────
+        # ── CÁMARA (zona principal: imagen + control manual abajo) ────
         cam_box = _make_box("Cámara")
         cam_v = QVBoxLayout(cam_box)
         cam_v.setContentsMargins(4, 4, 4, 4)
@@ -565,32 +426,184 @@ class MainWindow(QMainWindow):
             f" color: {_GRIS_CLR};"
             f" font-family: {_FAMILIA}; font-size: 12px;"
         )
-        self._camera_view.setMinimumSize(200, 120)
+        self._camera_view.setMinimumSize(240, 160)
         cam_v.addWidget(self._camera_view)
-        row_mid.addWidget(cam_box, 3)
+        left.addWidget(cam_box, 3)
 
-        root.addLayout(row_mid)
+        # ── CONTROL MANUAL (mando virtual: zona principal) ────────────
+        # Solo produce /cmd_vel cuando está activado (el switch de
+        # controller JTC -> forward_velocity_controller queda pendiente).
+        self._joystick_panel = JoystickPanel()
+        self._joystick_panel.toggled.connect(self._on_joystick_toggle)
+        left.addWidget(self._joystick_panel, 4)
 
-        # ── STOP ──────────────────────────────────────────────────────
-        stop_box = _make_box("Seguridad")
-        hb6 = QHBoxLayout(stop_box)
+        # ── STOP (visible e importante, integrado bajo el joystick) ───
         self.btn_stop = _make_btn(
             "STOP",
             _btn_style(
                 _ROJO,
-                font_size=14,
-                min_w=180,
-                min_h=44,
-                pad="10px 24px",
+                font_size=15,
+                min_w=170,
+                min_h=36,
+                pad="8px 20px",
                 extra=f"QPushButton:hover {{ background-color: {_ROJO_CLARO}; }}",
             ),
         )
-        hb6.addStretch()
-        hb6.addWidget(self.btn_stop)
-        hb6.addStretch()
-        root.addWidget(stop_box)
+        stop_row = QHBoxLayout()
+        stop_row.addStretch()
+        stop_row.addWidget(self.btn_stop)
+        stop_row.addStretch()
+        left.addLayout(stop_row)
 
-        # ── Mensajes / log del sistema ───────────────────────────────
+        # ── PUNTOS DE INSPECCIÓN (P1 / P2 / P3) ────────────────────────
+        insp_box = _make_box("Puntos de inspección")
+        v_puntos = QVBoxLayout(insp_box)
+        v_puntos.setSpacing(4)
+        hb_puntos = QHBoxLayout()
+        hb_puntos.setSpacing(8)
+        self.btn_p1 = _make_btn("P1", _btn_style(_GRIS_MED, min_w=54, min_h=30))
+        self.btn_p2 = _make_btn("P2", _btn_style(_GRIS_MED, min_w=54, min_h=30))
+        self.btn_p3 = _make_btn("P3", _btn_style(_GRIS_MED, min_w=54, min_h=30))
+        hb_puntos.addWidget(self.btn_p1)
+        hb_puntos.addWidget(self.btn_p2)
+        hb_puntos.addWidget(self.btn_p3)
+        v_puntos.addLayout(hb_puntos)
+        right.addWidget(insp_box)
+        # ── PUNTOS DEL USUARIO (lista + acciones) ─────────────────────
+        user_box = _make_box("Puntos del usuario")
+        v_user = QVBoxLayout(user_box)
+        v_user.setSpacing(6)
+        self._points_list = QListWidget()
+        self._points_list.setStyleSheet(
+            f"QListWidget {{ background-color: {_NEGRO}; color: {_BLANCO_HUESO};"
+            f" border: 1px solid {_GRIS_MED}; border-radius: 4px;"
+            f" font-family: {_FAM_MONO}; font-size: 12px; }}"
+            f"QListWidget::item {{ padding: 3px 6px; }}"
+            f"QListWidget::item:selected {{ background-color: {_AZUL}; }}"
+        )
+        self._points_list.setMinimumHeight(56)
+        v_user.addWidget(self._points_list)
+        up_btns = QGridLayout()
+        up_btns.setHorizontalSpacing(8)
+        up_btns.setVerticalSpacing(6)
+        up_btns.setColumnStretch(4, 1)
+        self.btn_new_point = _make_btn(
+            "NUEVO PUNTO", _btn_style(_AZUL, font_size=11, min_h=28, pad="4px 10px")
+        )
+        self.btn_edit_point = _make_btn(
+            "EDITAR", _btn_style(_GRIS_MED, font_size=11, min_h=28, pad="4px 10px")
+        )
+        self.btn_delete_point = _make_btn(
+            "ELIMINAR", _btn_style(_ROJO, font_size=11, min_h=28, pad="4px 10px")
+        )
+        self.btn_move_point = _make_btn(
+            "MOVER A PUNTO", _btn_style(_VERDE, font_size=11, min_h=28, pad="4px 10px")
+        )
+        self.btn_add_to_traj = _make_btn(
+            "AÑADIR A TRAYECTORIA",
+            _btn_style(_AZUL, font_size=11, min_h=28, pad="4px 10px"),
+        )
+        up_btns.addWidget(self.btn_new_point, 0, 0)
+        up_btns.addWidget(self.btn_edit_point, 0, 1)
+        up_btns.addWidget(self.btn_delete_point, 0, 2)
+        up_btns.addWidget(self.btn_move_point, 1, 0)
+        up_btns.addWidget(self.btn_add_to_traj, 1, 1, 1, 2)
+        v_user.addLayout(up_btns)
+        self.btn_edit_point.setEnabled(False)
+        self.btn_delete_point.setEnabled(False)
+        self.btn_move_point.setEnabled(False)
+        self.btn_add_to_traj.setEnabled(False)
+        right.addWidget(user_box, 1)
+
+        # ── TRAYECTORIA DEFINIDA (orden editable) + EJECUTAR ──────────
+        traj_box = _make_box("Trayectoria definida")
+        v_traj = QVBoxLayout(traj_box)
+        v_traj.setSpacing(6)
+        self._trajectory_list = QListWidget()
+        self._trajectory_list.setStyleSheet(
+            f"QListWidget {{ background-color: {_NEGRO}; color: {_BLANCO_HUESO};"
+            f" border: 1px solid {_GRIS_MED}; border-radius: 4px;"
+            f" font-family: {_FAM_MONO}; font-size: 12px; }}"
+            f"QListWidget::item {{ padding: 3px 6px; }}"
+            f"QListWidget::item:selected {{ background-color: {_AZUL}; }}"
+        )
+        self._trajectory_list.setMinimumHeight(56)
+        v_traj.addWidget(self._trajectory_list)
+        tuv_btns = QHBoxLayout()
+        tuv_btns.setSpacing(8)
+        self.btn_traj_up = _make_btn(
+            "↑", _btn_style(_GRIS_MED, font_size=12, min_h=28, min_w=38, pad="2px 8px")
+        )
+        self.btn_traj_down = _make_btn(
+            "↓", _btn_style(_GRIS_MED, font_size=12, min_h=28, min_w=38, pad="2px 8px")
+        )
+        self.btn_traj_remove = _make_btn(
+            "QUITAR", _btn_style(_ROJO, font_size=11, min_h=28, pad="4px 10px")
+        )
+        self.btn_traj_clear = _make_btn(
+            "LIMPIAR", _btn_style(_GRIS_MED, font_size=11, min_h=28, pad="4px 10px")
+        )
+        tuv_btns.addWidget(self.btn_traj_up)
+        tuv_btns.addWidget(self.btn_traj_down)
+        tuv_btns.addWidget(self.btn_traj_remove)
+        tuv_btns.addWidget(self.btn_traj_clear)
+        tuv_btns.addStretch()
+        self.btn_run = _make_btn(
+            "EJECUTAR TRAYECTORIA",
+            _btn_style(_VERDE, font_size=12, min_w=170, min_h=32, pad="6px 14px"),
+        )
+        v_traj.addLayout(tuv_btns)
+        tuv_run = QHBoxLayout()
+        tuv_run.addStretch()
+        tuv_run.addWidget(self.btn_run)
+        v_traj.addLayout(tuv_run)
+        self.btn_traj_up.setEnabled(False)
+        self.btn_traj_down.setEnabled(False)
+        self.btn_traj_remove.setEnabled(False)
+        self.btn_traj_clear.setEnabled(False)
+        right.addWidget(traj_box, 1)
+
+        # ── ESTADO / ARTICULACIONES (información secundaria) ──────────
+        jnt_box = _make_box("Estado / Articulaciones")
+        grid = QGridLayout(jnt_box)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(6)
+        grid.setColumnStretch(0, 0)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(2, 0)
+        grid.setColumnStretch(3, 1)
+        grid.setColumnStretch(4, 0)
+        grid.setColumnStretch(5, 1)
+        self._joint_labels: dict[str, QLabel] = {}
+        for idx, name in enumerate(self.JOINT_NAMES):
+            row, col = divmod(idx, 3)
+            lbl_name = QLabel(f"{name}:")
+            lbl_name.setStyleSheet(
+                _label_style(_BLANCO_HUESO, _FAM_MONO, 13, "min-width: 40px;")
+            )
+            lbl_name.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            lbl_val = QLabel("0.0000")
+            lbl_val.setStyleSheet(
+                _label_style(
+                    _AMARILLO_BRILLANTE, _FAM_MONO, 14,
+                    extra=(
+                        f"background-color: {_NEGRO};"
+                        f"border: 2px solid {_AMARILLO};"
+                        "border-radius: 4px;"
+                        "padding: 3px 8px;"
+                        "min-width: 100px;"
+                        "min-height: 22px;"
+                    ),
+                )
+            )
+            lbl_val.setAlignment(Qt.AlignCenter)
+            self._joint_labels[name] = lbl_val
+            grid.addWidget(lbl_name, row, col * 2)
+            grid.addWidget(lbl_val,  row, col * 2 + 1)
+
+        right.addWidget(jnt_box)
+
+        # ── Mensajes / log del sistema (protagonismo reducido) ───────
         log_box = _make_box("Mensajes")
         log_v = QVBoxLayout(log_box)
         log_v.setSpacing(4)
@@ -618,9 +631,11 @@ class MainWindow(QMainWindow):
             " font-size: 12px;"
             "}"
         )
-        self._log_edit.setMinimumHeight(120)
+        self._log_edit.setMinimumHeight(64)
         log_v.addWidget(self._log_edit)
-        root.addWidget(log_box)
+
+        # Mensajes: sección final de la columna derecha (crece con la ventana).
+        right.addWidget(log_box, 1)
 
         # ── Suscripción ROS a /joint_states (si hay nodo ROS) ──────────
         if self._ros_node is not None:
@@ -653,14 +668,14 @@ class MainWindow(QMainWindow):
         # ── Almacén de puntos del usuario (independiente de ROS) ───────
         self._load_user_points()
 
-        # ── Dimensionado: generoso y nunca menor que el contenido ─────
-        # min_h se baja para aprovechar el layout horizontal y caber en un
-        # portátil; sin llegar a comprimir el panel de mensajes.
-        self.adjustSize()
-        min_w = max(640, self.sizeHint().width())
-        min_h = max(560, self.sizeHint().height())
+        # ── Dimensionado: apaisado (~16:9), mínimo con suelo ancho ────
+        # El contenido no debe empujar la ventana en vertical: el ancho
+        # disponible lo reparten las dos columnas (~50/50).
+        mh = self.minimumSizeHint()
+        min_w = max(1120, mh.width())
+        min_h = max(640, mh.height())
         self.setMinimumSize(min_w, min_h)
-        self.resize(min_w, min_h)
+        self.resize(max(min_w, 1280), max(min_h, 850))
 
     # ── ROS 2: suscripción a /joint_states + estado del controller ────
     def _setup_ros(self) -> None:
@@ -717,6 +732,16 @@ class MainWindow(QMainWindow):
             _SWITCH_CONTROLLER_SRV, _SWITCH_CONTROLLER_SERVICE
         )
 
+        # Joystick virtual: publish de /cmd_vel (solo cuando está activo).
+        if self._joystick_panel is not None:
+            self._cmd_vel_pub = self._ros_node.create_publisher(
+                _CMD_VEL_MSG, _CMD_VEL_TOPIC, _CMD_VEL_QOS_DEPTH
+            )
+            self._ros_node.get_logger().info(
+                f"Publicando {_CMD_VEL_TOPIC} ({_CMD_VEL_MSG.__name__})."
+            )
+            self._log("info", f"Publicando {_CMD_VEL_TOPIC}")
+
     def _spin_once(self) -> None:
         """Procesa un callback ROS por tick sin bloquear la GUI."""
         if self._ros_node is not None and rclpy.ok():
@@ -724,6 +749,27 @@ class MainWindow(QMainWindow):
                 rclpy.spin_once(self._ros_node, timeout_sec=0)
             except Exception as exc:  # noqa: BLE001 - no romper la GUI
                 print(f"[GUI] error en rclpy.spin_once: {exc}")
+            self._publish_joystick_twist()
+
+    def _publish_joystick_twist(self) -> None:
+        """Publica /cmd_vel a partir del mando virtual (solo si está activo).
+
+        El mando NO genera velocidades articulares: emite un Twist
+        cartesiano (normalizado con ganancia) que consume el servo.
+        """
+        if not self._joystick_active or self._cmd_vel_pub is None:
+            return
+        if self._joystick_panel is None:
+            return
+        comp = self._joystick_panel.twist_components()
+        msg = Twist()
+        msg.linear.x = float(comp["linear"]["x"])
+        msg.linear.y = float(comp["linear"]["y"])
+        msg.linear.z = float(comp["linear"]["z"])
+        msg.angular.x = float(comp["angular"]["x"])
+        msg.angular.y = float(comp["angular"]["y"])
+        msg.angular.z = float(comp["angular"]["z"])
+        self._cmd_vel_pub.publish(msg)
 
     def _on_joint_states(self, msg: JointState) -> None:
         """Actualiza J1-J6 con la posición real de cada articulación."""
@@ -807,6 +853,9 @@ class MainWindow(QMainWindow):
                 self._motion_goal_handle.cancel_goal_async()
             except Exception:  # noqa: BLE001 - no romper el cierre
                 pass
+        if getattr(self, "_joystick_active", False):
+            self._send_zero_twist()  # seguridad: robot quieto al cerrar
+            self._joystick_active = False
         if self._ros_timer is not None:
             self._ros_timer.stop()
             self._ros_timer = None
@@ -819,6 +868,49 @@ class MainWindow(QMainWindow):
     def _set_status(self, text: str, color: str):
         self._status_label.setText(text)
         self._status_label.setStyleSheet(_label_style(color, _FAMILIA, 15))
+
+    # ── Joystick virtual: ACTIVAR/DESACTIVAR y /cmd_vel ───────────────
+    def _on_joystick_toggle(self, active: bool) -> None:
+        """Activa/desactiva la publicación de /cmd_vel desde el mando.
+
+        Estado pendiente (NO implementado en esta fase): el switch de
+        controllers joint_trajectory_controller -> forward_velocity_controller
+        cuando se activa, y la inversa al desactivar. Mientras tanto la GUI
+        SOLO publica /cmd_vel; el servo (que ya tiene watchdog) decide.
+        Si no hay ROS: marcamos el estado de forma inocua (placeholder).
+        """
+        if self._ros_node is None or self._cmd_vel_pub is None:
+            self._log(
+                "info",
+                f"JOYSTICK {'ACTIVADO' if active else 'DESACTIVADO'}"
+                " (sin ROS: /cmd_vel no publicado)",
+            )
+            return
+        self._joystick_active = active
+        if active:
+            self._log(
+                "info",
+                "JOYSTICK ACTIVADO: publicando /cmd_vel (switch de controller"
+                " JTC -> forward_velocity_controller PENDIENTE)",
+            )
+            self._set_status("● JOYSTICK ACTIVADO (publicando /cmd_vel)", _VERDE)
+        else:
+            self._send_zero_twist()
+            if self._joystick_panel is not None:
+                self._joystick_panel.reset()
+            self._log("warning", "JOYSTICK DESACTIVADO: Twist=0 enviado")
+            self._set_status("● JOYSTICK DESACTIVADO (robot quieto)", _GRIS_CLR)
+            # Restaurar el indicador de estado real (list_controllers).
+            QTimer.singleShot(1500, self._poll_controller_status)
+
+    def _send_zero_twist(self) -> None:
+        """Envía explícitamente un comando Twist=0 (seguridad)."""
+        if self._cmd_vel_pub is not None:
+            self._cmd_vel_pub.publish(Twist())
+            if self._ros_node is not None:
+                self._ros_node.get_logger().info(
+                    "JOYSTICK: Twist=0 publicado explícitamente."
+                )
 
     # ── ENABLE / DISABLE (switch_controller, asíncrono) ───────────────
     def _on_enable(self):
