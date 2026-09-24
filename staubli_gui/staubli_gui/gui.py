@@ -95,7 +95,12 @@ from .controller_manager import (
     switch_plan,
 )
 from .frame_control import FrameControlPanel
-from .user_points import UserPoint, UserPointStore, rpy_degrees_to_quaternion_xyzw
+from .user_points import (
+    UserPoint,
+    UserPointStore,
+    rpy_degrees_to_quaternion_xyzw,
+    user_point_from_joint_position,
+)
 
 
 # ─── Colores ───────────────────────────────────────────────────────────
@@ -448,6 +453,24 @@ class MainWindow(QMainWindow):
         self._frame_panel.toggled.connect(self._on_manual_toggle)
         left.addWidget(self._frame_panel, 4)
 
+        # ── GUARDAR POSICIÓN ACTUAL (captura J1-J6 reales como punto) ────
+        self.btn_capture_pos = _make_btn(
+            "GUARDAR POSICIÓN ACTUAL",
+            _btn_style(
+                _AMARILLO,
+                fg=_GRIS_OSC,
+                font_size=12,
+                min_w=230,
+                min_h=32,
+                pad="6px 14px",
+            ),
+        )
+        capt_row = QHBoxLayout()
+        capt_row.addStretch()
+        capt_row.addWidget(self.btn_capture_pos)
+        capt_row.addStretch()
+        left.addLayout(capt_row)
+
         # ── STOP (visible e importante, integrado bajo el control manual) ───
         self.btn_stop = _make_btn(
             "STOP",
@@ -668,6 +691,7 @@ class MainWindow(QMainWindow):
         self.btn_delete_point.clicked.connect(self._delete_point)
         self.btn_move_point.clicked.connect(self._move_to_point)
         self.btn_add_to_traj.clicked.connect(self._on_add_to_trajectory)
+        self.btn_capture_pos.clicked.connect(self._on_capture_position)
         self._trajectory_list.currentItemChanged.connect(
             self._update_trajectory_buttons
         )
@@ -1148,6 +1172,43 @@ class MainWindow(QMainWindow):
             self._store.save()
         except OSError as exc:  # noqa: BLE001 - no romper la GUI
             self._log("error", f"[PUNTOS] No se pudo guardar ({exc})")
+
+    def _on_capture_position(self) -> None:
+        """GUARDAR POSICIÓN ACTUAL: crea un UserPoint desde los J1-J6 reales.
+
+        La q leída de /joint_states ES la solución exacta (no se llama a la
+        IK inversa): FK con Tx260lKinematics y guardado en el mismo almacén
+        de Puntos del usuario. El punto aparece de inmediato en la lista y
+        queda seleccionado; NO se añade todavía a la trayectoria.
+        """
+        if self._store is None:
+            return
+        if self._motion_active:
+            return
+        if self._joints_now is None:
+            self._set_status("● GUARDAR: no hay /joint_states todavía", _ROJO)
+            return
+        try:
+            q = [self._joints_now[j] for j in _HOME_JOINT_NAMES]
+        except KeyError as exc:
+            self._set_status(f"● GUARDAR: /joint_states sin {exc}", _ROJO)
+            return
+        if self._user_kinematics is None:
+            from staubli_trajectory.tx2_60l_ik import Tx260lKinematics
+
+            self._user_kinematics = Tx260lKinematics()
+        point = user_point_from_joint_position(
+            self._default_next_point_name(), q, self._user_kinematics
+        )
+        if not point.inside_limits:
+            self._set_status("● GUARDAR: posición fuera de límites", _ROJO)
+            return
+        self._store.add(point)
+        self._save_user_points()
+        self._refresh_points_list()
+        self._points_list.setCurrentRow(list(self._store.names()).index(point.name))
+        self._log("ok", f"[PUNTOS] Posición actual guardada como '{point.name}'")
+        self._set_status(f"● POSICIÓN GUARDADA como {point.name}", _VERDE)
 
     def _refresh_points_list(self) -> None:
         if self._points_list is None:

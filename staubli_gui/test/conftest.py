@@ -15,6 +15,12 @@ _SRC_PKG_ROOT = Path(__file__).resolve().parents[1]
 if str(_SRC_PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(_SRC_PKG_ROOT))
 
+# Tx260lKinematics (paquete hermano staubli_trajectory). Basta con añadir la
+# raíz del paquete: su lookup de config sube por el árbol de fuentes repo.
+_TRAJ_PKG = _SRC_PKG_ROOT.parent / "staubli_trajectory"
+if str(_TRAJ_PKG) not in sys.path:
+    sys.path.insert(0, str(_TRAJ_PKG))
+
 import pytest
 
 

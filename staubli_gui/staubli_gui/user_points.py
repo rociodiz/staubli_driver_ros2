@@ -31,7 +31,7 @@ import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 import PyKDL as kdl
 import yaml
@@ -129,6 +129,39 @@ def _userpoint_to_dict(point: UserPoint) -> Dict[str, object]:
         "solved": bool(point.solved),
         "inside_limits": bool(point.inside_limits),
     }
+
+
+# ─── Captura desde la posición real del robot ───────────────────────────
+
+
+def user_point_from_joint_position(
+    name: str,
+    q: Sequence[float],
+    kinematics: "Tx260lKinematics",
+) -> UserPoint:
+    """Crea un UserPoint a partir de los J1-J6 reales (pose actual por FK).
+
+    Usa `forward_kinematics(q)`: la posición (X/Y/Z) y orientación
+    (RX/RY/RZ + cuaternión) de tool0 en base_link se calculan del mismo modo
+    que el helper de la IK, y `check_joint_limits(q)` decide si se guarda.
+    Al venir de la posición real del robot, la propia q es la solución
+    exacta: NO se llama a la IK inversa.
+    """
+    if len(q) != 6:
+        raise ValueError("se necesitan exactamente 6 articulaciones J1-J6.")
+    frame = kinematics.forward_kinematics(list(q))
+    p = frame.p
+    rpy = frame.M.GetRPY()
+    inside_limits, _ = kinematics.check_joint_limits(q)
+    return UserPoint(
+        name=name,
+        position_xyz=[float(p[0]), float(p[1]), float(p[2])],
+        rpy_degrees=[float(math.degrees(v)) for v in (rpy[0], rpy[1], rpy[2])],
+        quaternion_xyzw=[float(v) for v in frame.M.GetQuaternion()],
+        q=[float(v) for v in q],
+        solved=True,
+        inside_limits=inside_limits,
+    )
 
 
 # ─── Almacén ───────────────────────────────────────────────────────────
