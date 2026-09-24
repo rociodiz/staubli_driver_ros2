@@ -144,7 +144,7 @@ def test_ejecutar_con_lista_vacia_no_envia_goal(win, monkeypatch):
     enviados = []
     win._ros_node = object()
     win._action_client = object()
-    win._list_controllers_client = object()
+    win._ctrl = object()
     monkeypatch.setattr(win, "_run_goal", lambda **kw: enviados.append(kw))
     win._on_run()
     assert enviados == []  # ningún goal

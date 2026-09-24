@@ -45,40 +45,72 @@ def clamp_vector(vector: Sequence[float], limit: float) -> List[float]:
     return [float(v) for v in vec]
 
 
+def _smoothstep(x: float) -> float:
+    """Rampa suave C^1 en [0, 1] usada como factor de alcance por dirección."""
+    x = float(np.clip(x, 0.0, 1.0))
+    return x * x * (3.0 - 2.0 * x)
+
+
+# Valor de sigma (escala del Jacobiano, rad/s) a partir del cual se restaura la
+# ganancia DLS 1/sigma sin límite. Por debajo, la ganancia se acota a la rampa
+# lineal sigma/(sigma_rejoin^2+lambda^2), que nace en 0 de forma continua y sin
+# picos (elimina el amplificador 1/(2·lambda) del DLS clásico en la transición a
+# la singularidad). Se elige claramente por DEBAJO del sigma_min de las poses de
+# trabajo habituales (P1/P2/P3 ~ 0.17) para que éstas conserven EXACTAMENTE el
+# comportamiento del DLS clásico.
+_SIGMA_RECOVERY_FACTOR = 3.0
+
+
 def solve_qdot_dls(
     jacobian: np.ndarray,
     twist: Sequence[float],
     damping_lambda: float = 0.05,
     singularity_threshold: float = 0.02,
 ) -> tuple[np.ndarray, float, float, float]:
-    """Resuelve q_dot = J^T (J J^T + lambda^2 I)^-1 Twist (DLS).
+    """Resuelve q_dot = J^T (J J^T + lambda^2 I)^-1 Twist (DLS direccional).
 
-    Protección de singularidad:
-    - Si sigma_min < singularity_threshold, se reduce el Twist por un factor
-      scale = sigma_min / threshold (0..1) y se aumenta el amortiguamiento.
-    - Nunca se deja explotar q_dot.
+    Protección de singularidad POR DIRECCIÓN (SVD): se usa la descomposición
+    J = U Σ V^T y la salida se construye modo a modo en el espacio del Twist:
 
-    Devuelve (q_dot, sigma_min, scale, lambda_eff).
+        q_dot = Σ_i  gain(σ_i) · (u_iᵀ · Twist) · v_i
+        gain(σ) = σ / (max(σ, σ_rejoin)² + lambda²)
+        σ_rejoin = _SIGMA_RECOVERY_FACTOR · max(damping_lambda, singularity_threshold)
+
+    Propiedades:
+    - Fuera de la banda singular (σ_i >= σ_rejoin) gain(σ) = σ/(σ²+lambda²),
+      idéntico al DLS clásico: en P1/P2/P3 (σ_min ~ 0.17 > 0.15) no hay
+      regresión alguna.
+    - Cada dirección se atenúa SOLO según su propio σ: los modos bien
+      condicionados conservan la ganancia 1/σ y no se escala el Twist completo.
+    - Por debajo de σ_rejoin la ganancia es una rampa lineal en σ que nace en 0
+      (direcciones sin generador físico quedan exactamente a 0, sin falsear el
+      movimiento) y cuyo máximo está acotado (≈ 1/σ_rejoin): sin picos q_dot
+      enormes al cruzar la singularidad.
+    - La transición es continua y monótona: no hay salto de "se mueve" a
+      "cero absoluto".
+    - No se introduce epsilon para forzar σ_min ni se infla lambda globalmente:
+      el amortiguamiento efectivo es siempre el mismo damping_lambda.
+
+    Devuelve (q_dot, sigma_min, scale, lambda_eff), donde scale =
+    smoothstep(sigma_min / singularity_threshold) resume la autoridad retenida
+    (1.0 fuera de la singularidad) y lambda_eff es el amortiguamiento constante
+    usado.
     """
     jac = np.asarray(jacobian, dtype=float)
     twist = np.asarray(twist, dtype=float).reshape(6)
 
-    sigma = np.linalg.svd(jac, compute_uv=False)
+    sigma_rejoin = _SIGMA_RECOVERY_FACTOR * max(damping_lambda, singularity_threshold)
+
+    u, sigma, vh = np.linalg.svd(jac, full_matrices=False)
     sigma_min = float(np.min(sigma))
+    scale = _smoothstep(sigma_min / singularity_threshold)
 
-    scale = 1.0
-    lambda_eff = float(damping_lambda)
-    if sigma_min < singularity_threshold:
-        scale = max(0.0, sigma_min / singularity_threshold)
-        lambda_eff = max(
-            lambda_eff,
-            damping_lambda * singularity_threshold / max(sigma_min, 1.0e-9),
-        )
-
-    twist_scaled = twist * scale
-    a_mat = jac @ jac.T + lambda_eff**2 * np.eye(6)
-    q_dot = jac.T @ np.linalg.solve(a_mat, twist_scaled)
-    return q_dot, sigma_min, scale, lambda_eff
+    q_dot = np.zeros(6)
+    for i, sig in enumerate(sigma):
+        if sig > 0.0:
+            gain = sig / (max(sig, sigma_rejoin) ** 2 + damping_lambda**2)
+            q_dot += gain * float(u[:, i] @ twist) * vh[i]
+    return q_dot, sigma_min, float(scale), float(damping_lambda)
 
 
 def scale_to_joint_velocity_limits(

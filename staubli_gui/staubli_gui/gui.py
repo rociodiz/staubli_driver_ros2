@@ -5,8 +5,10 @@ Integración ROS 2:
      RELIABLE + TRANSIENT_LOCAL + KEEP_LAST(1) para mostrar en tiempo real
      las posiciones joint_1..joint_6 -> J1..J6 (radianes, 4 decimales).
   2. Servicio /controller_manager/list_controllers (~1 s) para el indicador
-     de estado: "HABILITADO" si joint_trajectory_controller está 'active',
-     "DESHABILITADO" en caso contrario.
+     de estado y el modo actual (TRAYECTORIA/MANUAL/SEGURO) basado en el
+     estado real de joint_trajectory_controller y forward_velocity_controller.
+  3. Servicio /controller_manager/switch_controller (STRICT) para cambiar de
+     modo de forma atómica y verificar el resultado sin terminal manual.
   3. Acción /joint_trajectory_controller/follow_joint_trajectory (HOME y
      P1-P3): envía goals de un solo waypoint (posición articular) usando la
      misma lógica de goal (FollowJointTrajectory + JointTolerance) que
@@ -15,10 +17,21 @@ Integración ROS 2:
      TrajectoryBuilder); no se duplican coordenadas ni IK aquí.
 
 El bucle ROS se integra con el ciclo de eventos de Qt mediante un QTimer
-que ejecuta rclpy.spin_once(...) periódicamente. ENABLE/DISABLE, HOME,
-P1-P3, EJECUTAR TRAYECTORIA (reutiliza plan.trajectory) y STOP (cancela el
-goal activo; el controller permanece 'active') están implementados; el
-panel "Mensajes" refleja en tiempo real los eventos del sistema.
+que ejecuta rclpy.spin_once(...) periódicamente.
+
+Modo de control EXCLUYENTE: las acciones HOME, P1-P3, MOVER A PUNTO y
+EJECUTAR TRAYECTORIA exigen joint_trajectory_controller activo (modo
+TRAYECTORIA); el MANDO VIRTUAL exige forward_velocity_controller (modo
+MANUAL). Nunca pueden estar ambos activos: la GUI cambia los
+controladores por /controller_manager/switch_controller (STRICT, atómico)
+antes de cada acción, verifica el resultado y avisa si falla, de modo que
+el usuario no necesita tocar la terminal. El joint_state_broadcaster queda
+siempre activo. En el arranque la GUI corrige automáticamente un posible
+conflicto (JTC+FVC activos) volviendo a TRAYECTORIA.
+
+DO STOP detiene el movimiento en curso: con el control manual activo envía
+Twist=0 y vuelve a TRAYECTORIA; con un goal activo lo cancela. El panel
+"Mensajes" refleja en tiempo real los eventos del sistema.
 
    Cámara eye-in-hand: suscripción directa a /camera/image_raw
    (sensor_msgs/msg/Image, QoS sensor_data) y conversión de canal
@@ -27,11 +40,12 @@ panel "Mensajes" refleja en tiempo real los eventos del sistema.
    actualiza el visor directamente. La imagen se escala con Qt manteniendo
    la relación de aspecto; solo se re-escala cuando cambia el tamaño del
    visor (no en cada frame), para no penalizar el spin a 30 Hz.
-   4. Mando virtual (joystick): dos sticks (izq -> linear.x/y; der ->
-      angular.z/y), botones Z+/Z- (linear.z) y ganancia. Genera un Twist
-      normalizado que la GUI publica en /cmd_vel SOLO con el joystick
-      ACTIVADO (botón explícito); al desactivar envía un Twist=0. NUNCA
-      calcula IK ni velocidades articulares (lo hace el servo).
+   4. Control manual (FRAME): seis pares de botones +/− (X, Y, Z, RX, RY,
+      RZ) que generan un Twist cartesiano normalizado que la GUI publica en
+      /cmd_vel SOLO con el control manual ACTIVADO (botón ACTIVAR MANUAL ->
+      cambio a forward_velocity_controller). Al desactivar (VOLVER A
+      TRAYECTORIA) envía un Twist=0 y restaura el joint_trajectory_controller.
+      NUNCA calcula IK ni velocidades articulares (lo hace el servo).
 """
 
 import sys
@@ -41,7 +55,6 @@ import rclpy
 from action_msgs.srv import CancelGoal
 from control_msgs.action import FollowJointTrajectory
 from control_msgs.msg import JointTolerance
-from controller_manager_msgs.srv import ListControllers, SwitchController
 from geometry_msgs.msg import Twist
 from rclpy.action import ActionClient
 from rclpy.duration import Duration
@@ -74,7 +87,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .joystick_widgets import JoystickPanel
+from .controller_manager import (
+    ControllerManager,
+    FORWARD_VELOCITY_CONTROLLER,
+    JOINT_TRAJECTORY_CONTROLLER,
+    derive_mode,
+    switch_plan,
+)
+from .frame_control import FrameControlPanel
 from .user_points import UserPoint, UserPointStore, rpy_degrees_to_quaternion_xyzw
 
 
@@ -125,21 +145,12 @@ _CAMERA_MSG = Image
 _CAMERA_QOS = qos_profile_sensor_data
 _CAMERA_RGB8 = "rgb8"  # el sensor gz publica R8G8B8 -> 'rgb8' (sin cv_bridge)
 
-# ─── ROS 2 (fase 2: indicador de estado HABILITADO/DESHABILITADO) ─────
-# Consulta periódica del estado del joint_trajectory_controller mediante
-# el servicio /controller_manager/list_controllers (~1 s).
-_LIST_CONTROLLERS_SERVICE = "/controller_manager/list_controllers"
-_LIST_CONTROLLERS_SRV = ListControllers
-_JTC_CONTROLLER_NAME = "joint_trajectory_controller"
-_STATUS_POLL_MS = 1000  # ~1 Hz (indicador de estado)
-
-# ── ENABLE / DISABLE (servicio switch_controller, asíncrono) ──────────
-# Activa/desactiva joint_trajectory_controller. BEST_EFFORT evita error si
-# el controller ya está en el estado pedido.
-_SWITCH_CONTROLLER_SERVICE = "/controller_manager/switch_controller"
-_SWITCH_CONTROLLER_SRV = SwitchController
-_SWITCH_STRICTNESS = SwitchController.Request.BEST_EFFORT
-_SWITCH_TIMEOUT_S = 5.0
+# ─── ROS 2 (fase 2: indicador de estado de los controladores) ─────────
+# Consulta periódica del estado de los controladores mediante el servicio
+# /controller_manager/list_controllers (~1 s). Los modos TRAYECTORIA
+# (joint_trajectory_controller) y MANUAL (forward_velocity_controller)
+# son EXCLUYENTES; joint_state_broadcaster queda siempre activo.
+_STATUS_POLL_MS = 1000  # ~1 Hz (indicador de estado y del modo)
 
 # ── HOME (acción FollowJointTrajectory, misma lógica que staubli_trajectory) ──
 _HOME_ACTION = "/joint_trajectory_controller/follow_joint_trajectory"
@@ -164,10 +175,10 @@ _HOME_RESULT_CODES = {
     _HOME_MSG.Result.GOAL_TOLERANCE_VIOLATED: "GOAL_TOLERANCE_VIOLATED",
 }
 
-# ─── ROS 2 (joystick virtual, fase 4: publicación de /cmd_vel) ────────
-# La GUI publica geometry_msgs/Twist en /cmd_vel SOLO con el joystick
-# activado. El mando NO calcula IK ni velocidades articulares: ese trabajo
-# es de staubli_joystick_servo (Jacobi + DLS). QoS RELIABLE depth 10,
+# ─── ROS 2 (control manual, fase 4: publicación de /cmd_vel) ──────────
+# La GUI publica geometry_msgs/Twist en /cmd_vel SOLO con el control
+# manual activado. El control NO calcula IK ni velocidades articulares: ese
+# trabajo es de staubli_joystick_servo (Jacobi + DLS). QoS RELIABLE depth 10,
 # compatible con la suscripción del servo (default).
 _CMD_VEL_TOPIC = "/cmd_vel"
 _CMD_VEL_MSG = Twist
@@ -341,10 +352,10 @@ class MainWindow(QMainWindow):
         self._ros_node = ros_node
         self._ros_timer: QTimer | None = None
         self._joint_states_sub = None
-        self._list_controllers_client = None
+        self._ctrl: ControllerManager | None = None  # cliente de /controller_manager
         self._status_timer: QTimer | None = None
-        self._switch_controller_client = None
-        self._switch_pending = False
+        self._switch_busy = False  # hay un cambio de controladores en curso
+        self._after_switch = None  # callable(ok, msg) al terminar ese cambio
         self._action_client: ActionClient | None = None
         self._motion_goal_handle = None
         self._motion_active = False  # exclusividad HOME + P1-P3 + TRAYECTORIA
@@ -360,9 +371,9 @@ class MainWindow(QMainWindow):
         self._camera_sub = None  # suscripción a /camera/image_raw
         self._camera_view: CameraView | None = None  # visor de vídeo
         self._warned_encoding: str | None = None  # encoding ignorado (1 aviso)
-        self._cmd_vel_pub = None  # publisher de /cmd_vel (joystick virtual)
-        self._joystick_panel: JoystickPanel | None = None  # mando virtual
-        self._joystick_active = False  # solo se publica /cmd_vel si está activo
+        self._cmd_vel_pub = None  # publisher de /cmd_vel (control manual)
+        self._frame_panel: FrameControlPanel | None = None  # control FRAME
+        self._manual_active = False  # solo se publica /cmd_vel si está activo
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -398,8 +409,8 @@ class MainWindow(QMainWindow):
         hb = QHBoxLayout(top_box)
         hb.setContentsMargins(10, 2, 10, 4)
         hb.setSpacing(12)
-        self._status_label = QLabel("● DESHABILITADO")
-        self._status_label.setStyleSheet(_label_style(_ROJO, _FAMILIA, 13))
+        self._status_label = QLabel("● CONECTANDO...")
+        self._status_label.setStyleSheet(_label_style(_GRIS_MED, _FAMILIA, 13))
         self._status_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         hb.addWidget(self._status_label)
         hb.addSpacing(18)
@@ -433,11 +444,11 @@ class MainWindow(QMainWindow):
         # ── CONTROL MANUAL (mando virtual: zona principal) ────────────
         # Solo produce /cmd_vel cuando está activado (el switch de
         # controller JTC -> forward_velocity_controller queda pendiente).
-        self._joystick_panel = JoystickPanel()
-        self._joystick_panel.toggled.connect(self._on_joystick_toggle)
-        left.addWidget(self._joystick_panel, 4)
+        self._frame_panel = FrameControlPanel()
+        self._frame_panel.toggled.connect(self._on_manual_toggle)
+        left.addWidget(self._frame_panel, 4)
 
-        # ── STOP (visible e importante, integrado bajo el joystick) ───
+        # ── STOP (visible e importante, integrado bajo el control manual) ───
         self.btn_stop = _make_btn(
             "STOP",
             _btn_style(
@@ -709,10 +720,9 @@ class MainWindow(QMainWindow):
             )
             self._log("info", f"Suscrito a {_CAMERA_TOPIC}")
 
-        # Estado del joint_trajectory_controller (list_controllers).
-        self._list_controllers_client = self._ros_node.create_client(
-            _LIST_CONTROLLERS_SRV, _LIST_CONTROLLERS_SERVICE
-        )
+        # Estados de los controladores (list_controllers + switch_controller):
+        # el modo TRAYECTORIA/MANUAL es excluyente y se gestiona aquí.
+        self._ctrl = ControllerManager(self._ros_node)
         self._status_timer = QTimer(self)
         self._status_timer.setInterval(_STATUS_POLL_MS)
         self._status_timer.timeout.connect(self._poll_controller_status)
@@ -727,13 +737,8 @@ class MainWindow(QMainWindow):
         # IK/config de points.yaml -> posiciones articulares de P1/P2/P3.
         self._load_point_plan()
 
-        # ENABLE / DISABLE: client del servicio switch_controller.
-        self._switch_controller_client = self._ros_node.create_client(
-            _SWITCH_CONTROLLER_SRV, _SWITCH_CONTROLLER_SERVICE
-        )
-
-        # Joystick virtual: publish de /cmd_vel (solo cuando está activo).
-        if self._joystick_panel is not None:
+        # Control manual: publish de /cmd_vel (solo cuando está activo).
+        if self._frame_panel is not None:
             self._cmd_vel_pub = self._ros_node.create_publisher(
                 _CMD_VEL_MSG, _CMD_VEL_TOPIC, _CMD_VEL_QOS_DEPTH
             )
@@ -743,25 +748,43 @@ class MainWindow(QMainWindow):
             self._log("info", f"Publicando {_CMD_VEL_TOPIC}")
 
     def _spin_once(self) -> None:
-        """Procesa un callback ROS por tick sin bloquear la GUI."""
-        if self._ros_node is not None and rclpy.ok():
-            try:
-                rclpy.spin_once(self._ros_node, timeout_sec=0)
-            except Exception as exc:  # noqa: BLE001 - no romper la GUI
-                print(f"[GUI] error en rclpy.spin_once: {exc}")
-            self._publish_joystick_twist()
+        """Procesa un callback ROS por tick sin bloquear la GUI.
 
-    def _publish_joystick_twist(self) -> None:
-        """Publica /cmd_vel a partir del mando virtual (solo si está activo).
+        Si ROS se ha apagado (p.ej. SIGINT/Ctrl+C desde ros2 launch, que hace
+        que rclpy cierre su contexto) la GUI se cierra sola: si no, quedaría
+        como proceso huérfano y el siguiente arranque crearía un nodo
+        /staubli_gui duplicado.
+        """
+        if self._ros_node is None:
+            return
+        if not rclpy.ok():
+            self._close_for_shutdown()
+            return
+        try:
+            rclpy.spin_once(self._ros_node, timeout_sec=0)
+        except Exception as exc:  # noqa: BLE001 - spin_once lanza al apagarse
+            self._ros_node.get_logger().warn(f"rclpy detenido: {exc}")
+            self._close_for_shutdown()
+            return
+        self._publish_manual_twist()
 
-        El mando NO genera velocidades articulares: emite un Twist
+    def _close_for_shutdown(self) -> None:
+        """Cierra la ventana cuando ROS se apaga (termina app.exec())."""
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
+
+    def _publish_manual_twist(self) -> None:
+        """Publica /cmd_vel a partir del control FRAME (solo si está activo).
+
+        El control NO genera velocidades articulares: emite un Twist
         cartesiano (normalizado con ganancia) que consume el servo.
         """
-        if not self._joystick_active or self._cmd_vel_pub is None:
+        if not self._manual_active or self._cmd_vel_pub is None:
             return
-        if self._joystick_panel is None:
+        if self._frame_panel is None:
             return
-        comp = self._joystick_panel.twist_components()
+        comp = self._frame_panel.twist_components()
         msg = Twist()
         msg.linear.x = float(comp["linear"]["x"])
         msg.linear.y = float(comp["linear"]["y"])
@@ -814,37 +837,60 @@ class MainWindow(QMainWindow):
             return
         self._camera_view.set_frame(image)
 
-    # ── ROS 2: estado del joint_trajectory_controller ─────────────────
+    # ── ROS 2: estado de los controladores (modo exclusivo) ─────────────
     def _poll_controller_status(self) -> None:
         """Lanza una consulta asíncrona a /controller_manager/list_controllers."""
-        if self._list_controllers_client is None or not rclpy.ok():
+        if self._ctrl is None or self._switch_busy or not rclpy.ok():
             return
-        if not self._list_controllers_client.service_is_ready():
-            return
-        try:
-            future = self._list_controllers_client.call_async(
-                _LIST_CONTROLLERS_SRV.Request()
-            )
-            future.add_done_callback(self._on_controller_status_response)
-        except Exception as exc:  # noqa: BLE001 - no romper la GUI
-            print(f"[GUI] error consultando estado del controller: {exc}")
+        self._ctrl.refresh(done_callback=self._on_controller_status_response)
 
-    def _on_controller_status_response(self, future) -> None:
-        """Actualiza el indicador según el estado de joint_trajectory_controller."""
-        try:
-            response = future.result()
-        except Exception as exc:  # noqa: BLE001 - no romper la GUI
-            print(f"[GUI] fallo en list_controllers: {exc}")
+    def _on_controller_status_response(self, states, ok, error=None) -> None:
+        """Actualiza el indicador de estado y el modo actual de la GUI."""
+        if not ok:
             return
-        estado = None
-        for ctrl in response.controller:
-            if ctrl.name == _JTC_CONTROLLER_NAME:
-                estado = ctrl.state
-                break
-        if estado == "active":
-            self._set_status("● HABILITADO", _VERDE)
+        mode = derive_mode(states)
+        self._update_mode_display(mode, states)
+        if mode == "conflicto":
+            # JTC y FVC activos: estado prohibido. Se vuelve a trayectoria.
+            self._log(
+                "warning",
+                "CONFLICTO: joint_trajectory_controller y "
+                "forward_velocity_controller activos; volviendo a TRAYECTORIA",
+            )
+            self._switch_to_mode("trayectoria", reason="resolver conflicto")
+
+    def _update_mode_display(self, mode: str, states: dict | None = None) -> None:
+        """Refleja el modo actual en el indicador MODO ACTUAL y en el estado."""
+        if mode == "trayectoria":
+            ctrl = JOINT_TRAJECTORY_CONTROLLER
+        elif mode == "manual":
+            ctrl = FORWARD_VELOCITY_CONTROLLER
         else:
-            self._set_status("● DESHABILITADO", _ROJO)
+            ctrl = None
+        pack_mode = mode if mode in (
+            "trayectoria", "manual", "seguro", "conflicto", "desconocido",
+        ) else "desconocido"
+        if self._frame_panel is not None:
+            self._frame_panel.set_mode_state(
+                pack_mode,
+                controller=ctrl,
+                velocity_pct=self._frame_panel.velocity_percent(),
+            )
+        colores = {
+            "trayectoria": _VERDE,
+            "manual": "#f39c12",
+            "seguro": _GRIS_MED,
+            "conflicto": _ROJO,
+            "desconocido": _GRIS_MED,
+        }
+        textos = {
+            "trayectoria": "● HABILITADO (MODO TRAYECTORIA)",
+            "manual": "● MODO MANUAL (CONTROL FRAME)",
+            "seguro": "● MODO SEGURO (sin controlador activo)",
+            "conflicto": "● CONFLICTO DE CONTROLADORES",
+            "desconocido": "● CONECTANDO...",
+        }
+        self._set_status(textos[mode], colores[mode])
 
     def closeEvent(self, event):  # noqa: N802 - firma de Qt
         """Detiene los timers ROS y evita callbacks tras cerrar la ventana."""
@@ -853,9 +899,9 @@ class MainWindow(QMainWindow):
                 self._motion_goal_handle.cancel_goal_async()
             except Exception:  # noqa: BLE001 - no romper el cierre
                 pass
-        if getattr(self, "_joystick_active", False):
+        if getattr(self, "_manual_active", False):
             self._send_zero_twist()  # seguridad: robot quieto al cerrar
-            self._joystick_active = False
+            self._manual_active = False
         if self._ros_timer is not None:
             self._ros_timer.stop()
             self._ros_timer = None
@@ -864,44 +910,141 @@ class MainWindow(QMainWindow):
             self._status_timer = None
         super().closeEvent(event)
 
-    # ── Callbacks placeholder (sin ROS) ───────────────────────────────
+    # ── Placeholders (sin ROS) ────────────────────────────────────────
     def _set_status(self, text: str, color: str):
         self._status_label.setText(text)
         self._status_label.setStyleSheet(_label_style(color, _FAMILIA, 15))
 
-    # ── Joystick virtual: ACTIVAR/DESACTIVAR y /cmd_vel ───────────────
-    def _on_joystick_toggle(self, active: bool) -> None:
-        """Activa/desactiva la publicación de /cmd_vel desde el mando.
+    # ── Cambio de controladores (modo excluyente TRAYECTORIA/MANUAL) ──
+    def _switch_to_mode(
+        self,
+        mode: str,
+        *,
+        after=None,
+        reason: str = "",
+    ) -> None:
+        """Solicita de forma asíncrona alcanzar `mode` cambiando controladores.
 
-        Estado pendiente (NO implementado en esta fase): el switch de
-        controllers joint_trajectory_controller -> forward_velocity_controller
-        cuando se activa, y la inversa al desactivar. Mientras tanto la GUI
-        SOLO publica /cmd_vel; el servo (que ya tiene watchdog) decide.
-        Si no hay ROS: marcamos el estado de forma inocua (placeholder).
+        Solo hay un cambio en curso a la vez (_switch_busy). Al terminar se
+        llama a `after(ok, message)`. Si no hace falta cambiar nada se llama
+        a `after` con ok=True.
+        """
+        if self._ctrl is None:
+            if after is not None:
+                after(False, "controller_manager no disponible")
+            return
+        if self._switch_busy:
+            self._log(
+                "warning",
+                "CAMBIO DE CONTROLADOR EN CURSO: operación ignorada",
+            )
+            if after is not None:
+                after(False, "ya hay un cambio de controlador en curso")
+            return
+        plan = switch_plan(mode)
+        if not plan["activate"] and not plan["deactivate"]:
+            if after is not None:
+                after(True, "sin cambios necesarios")
+            return
+        self._after_switch = after
+        self._switch_busy = True
+        self.btn_enable.setEnabled(False)
+        self.btn_disable.setEnabled(False)
+        self._pause_status_poll()
+        texto = mode.upper()
+        self._log("info", f"{texto}: cambiando controladores ({reason})...")
+        self._set_status(f"● {texto}: CAMBIANDO CONTROLADOR...", _AZUL)
+        self._ctrl.switch(
+            activate=plan["activate"],
+            deactivate=plan["deactivate"],
+            done_callback=lambda ok, states, msg: self._on_mode_switch_done(
+                mode, ok, states, msg
+            ),
+        )
+
+    def _on_mode_switch_done(self, mode: str, ok: bool, states, message: str) -> None:
+        """Fin del cambio de controladores: actualiza GUI y ejecuta `after`."""
+        self._switch_busy = False
+        self.btn_enable.setEnabled(True)
+        self.btn_disable.setEnabled(True)
+        self._update_mode_display(derive_mode(states), states)
+        self._resume_status_poll()
+        if ok:
+            self._log("ok", f"{mode.upper()}: controladores cambiados ({message})")
+        else:
+            self._log(
+                "error",
+                f"{mode.upper()}: FALLÓ el cambio de controladores ({message})",
+            )
+            self._set_status(
+                f"● ERROR: no se pudo pasar a {mode.upper()} ({message})", _ROJO
+            )
+        after = self._after_switch
+        self._after_switch = None
+        if after is not None:
+            after(ok, message)
+
+    # ── Control manual (FRAME): ACTIVAR/VOLVER y /cmd_vel ───────────────
+    def _on_manual_toggle(self, active: bool) -> None:
+        """Activa/desactiva el control manual CAMBIANDO de controlador.
+
+        Activar -> forward_velocity_controller (modo MANUAL); volver ->
+        joint_trajectory_controller (modo TRAYECTORIA). El cambio es
+        asíncrono y verificado; solo se publica /cmd_vel cuando se confirma.
+        Si no hay ROS (placeholder) no se publica nada.
         """
         if self._ros_node is None or self._cmd_vel_pub is None:
             self._log(
                 "info",
-                f"JOYSTICK {'ACTIVADO' if active else 'DESACTIVADO'}"
-                " (sin ROS: /cmd_vel no publicado)",
+                f"CONTROL MANUAL {'ACTIVAR' if active else 'VOLVER'}"
+                " (sin ROS: no publicado)",
             )
             return
-        self._joystick_active = active
-        if active:
-            self._log(
-                "info",
-                "JOYSTICK ACTIVADO: publicando /cmd_vel (switch de controller"
-                " JTC -> forward_velocity_controller PENDIENTE)",
-            )
-            self._set_status("● JOYSTICK ACTIVADO (publicando /cmd_vel)", _VERDE)
-        else:
-            self._send_zero_twist()
-            if self._joystick_panel is not None:
-                self._joystick_panel.reset()
-            self._log("warning", "JOYSTICK DESACTIVADO: Twist=0 enviado")
-            self._set_status("● JOYSTICK DESACTIVADO (robot quieto)", _GRIS_CLR)
-            # Restaurar el indicador de estado real (list_controllers).
-            QTimer.singleShot(1500, self._poll_controller_status)
+        if self._switch_busy:
+            self._log("warning", "CONTROL MANUAL: cambio de controlador en curso, espera")
+            return
+        objetivo = "manual" if active else "trayectoria"
+        self._log(
+            "info",
+            f"{'ACTIVAR MANUAL' if active else 'VOLVER A TRAYECTORIA'}:"
+            " solicitando cambio de controlador",
+        )
+        self._set_status(
+            ("● ACTIVANDO CONTROL MANUAL..." if active else "● VOLVIENDO A TRAYECTORIA..."),
+            _AZUL,
+        )
+        if self._frame_panel is not None:
+            self._frame_panel.set_toggle_busy()  # bloqueado hasta confirmar
+
+        def _despues(ok: bool, message: str) -> None:
+            if not ok:
+                # El switch falló: nada de publicar, estado seguro.
+                self._manual_active = False
+                self._send_zero_twist()
+                if self._frame_panel is not None:
+                    self._frame_panel.reset()
+                self._set_status(
+                    f"● ERROR: cambio a {objetivo} FALLÓ ({message})", _ROJO
+                )
+            else:
+                self._manual_active = bool(active)
+                if self._manual_active:
+                    self._log("info", "CONTROL MANUAL ACTIVADO: publicando /cmd_vel")
+                    self._set_status(
+                        "● CONTROL MANUAL ACTIVADO (publicando /cmd_vel)", "#f39c12"
+                    )
+                else:
+                    self._send_zero_twist()
+                    if self._frame_panel is not None:
+                        self._frame_panel.reset()
+                    self._log("warning", "CONTROL MANUAL DESACTIVADO: Twist=0 enviado")
+                    self._set_status(
+                        "● CONTROL MANUAL DESACTIVADO (robot quieto)", _GRIS_CLR
+                    )
+            if self._frame_panel is not None:
+                self._frame_panel.set_toggle_state(self._manual_active)
+
+        self._switch_to_mode(objetivo, after=_despues, reason="manual")
 
     def _send_zero_twist(self) -> None:
         """Envía explícitamente un comando Twist=0 (seguridad)."""
@@ -909,88 +1052,23 @@ class MainWindow(QMainWindow):
             self._cmd_vel_pub.publish(Twist())
             if self._ros_node is not None:
                 self._ros_node.get_logger().info(
-                    "JOYSTICK: Twist=0 publicado explícitamente."
+                    "CONTROL MANUAL: Twist=0 publicado explícitamente."
                 )
 
-    # ── ENABLE / DISABLE (switch_controller, asíncrono) ───────────────
+    # ── ENABLE / DISABLE (cambio de controladores asíncrono) ─────────
     def _on_enable(self):
-        self._switch_controller(activate=True)
+        self._switch_to_mode_manual("trayectoria", "ENABLE")
 
     def _on_disable(self):
-        self._switch_controller(activate=False)
+        self._switch_to_mode_manual("seguro", "DISABLE")
 
-    def _switch_controller(self, activate: bool) -> None:
-        """Activa/desactiva joint_trajectory_controller sin bloquear la GUI."""
-        if self._ros_node is None or self._switch_controller_client is None:
-            print("[GUI] switch_controller sin ROS (placeholder)")
+    def _switch_to_mode_manual(self, mode: str, accion: str) -> None:
+        """ENABLE/DISABLE: no se cambia de controlador con un movimiento vivo."""
+        if self._motion_active:
+            self._log("warning", f"{accion}: movimiento en curso, ignorado")
+            self._set_status("● CAMBIO DE MODO BLOQUEADO (movimiento en curso)", _AMARILLO)
             return
-        if self._switch_pending:
-            return
-        if not self._switch_controller_client.service_is_ready():
-            self._set_status("● CONTROLLER: SERVICIO NO DISPONIBLE", _ROJO)
-            self._ros_node.get_logger().error(
-                f"{_SWITCH_CONTROLLER_SERVICE} no disponible."
-            )
-            return
-
-        request = _SWITCH_CONTROLLER_SRV.Request()
-        if activate:
-            request.activate_controllers = [_JTC_CONTROLLER_NAME]
-        else:
-            request.deactivate_controllers = [_JTC_CONTROLLER_NAME]
-        request.strictness = _SWITCH_STRICTNESS
-        request.activate_asap = False
-        request.timeout = Duration(seconds=_SWITCH_TIMEOUT_S).to_msg()
-
-        accion = "ENABLE" if activate else "DISABLE"
-        self._switch_pending = True
-        self.btn_enable.setEnabled(False)
-        self.btn_disable.setEnabled(False)
-        self._set_status(
-            f"● {accion}: {'ACTIVANDO' if activate else 'DESACTIVANDO'}...", _AZUL
-        )
-        self._ros_node.get_logger().info(
-            f"{accion}: switch_controller "
-            f"{'activate' if activate else 'deactivate'} {_JTC_CONTROLLER_NAME}..."
-        )
-        self._log("info", f"{accion}: solicitando switch_controller...")
-        try:
-            future = self._switch_controller_client.call_async(request)
-            future.add_done_callback(
-                lambda fut: self._on_switch_controller_response(fut, accion)
-            )
-        except Exception as exc:  # noqa: BLE001 - no romper la GUI
-            self._finish_switch(accion, False, str(exc))
-
-    def _on_switch_controller_response(self, future, accion: str) -> None:
-        """Respuesta del switch_controller: ok + mensaje de error si falla."""
-        try:
-            response = future.result()
-        except Exception as exc:  # noqa: BLE001 - no romper la GUI
-            self._finish_switch(accion, False, str(exc))
-            return
-        self._finish_switch(accion, bool(response.ok), response.message)
-
-    def _finish_switch(self, accion: str, ok: bool, message: str) -> None:
-        """Restaura botones y refleja el resultado de ENABLE/DISABLE."""
-        self._switch_pending = False
-        self.btn_enable.setEnabled(True)
-        self.btn_disable.setEnabled(True)
-        if self._ros_node is not None:
-            logger = self._ros_node.get_logger()
-            (logger.info if ok else logger.error)(
-                f"{accion}: {'OK' if ok else 'FALLÓ'} ({message})"
-            )
-        if ok:
-            self._log("ok", f"{accion}: OK ({message})")
-            if accion == "ENABLE":
-                self._set_status("● HABILITADO", _VERDE)
-            else:
-                self._set_status("● DESHABILITADO", _ROJO)
-            self._poll_controller_status()  # confirmar con el estado real
-        else:
-            self._log("error", f"{accion}: FALLÓ ({message})")
-            self._set_status(f"● {accion} FALLÓ: {message}", _ROJO)
+        self._switch_to_mode(mode, reason=f"{accion} manual")
 
     # ── Movimiento HOME + P1-P3 (Goal único, asíncrono, común) ─────────
     def _on_home(self):
@@ -1001,7 +1079,7 @@ class MainWindow(QMainWindow):
         if (
             self._ros_node is None
             or self._action_client is None
-            or self._list_controllers_client is None
+            or self._ctrl is None
         ):
             print("[GUI] HOME presionado (sin ROS: placeholder)")
             return
@@ -1460,21 +1538,17 @@ class MainWindow(QMainWindow):
         tag: str,
         fail_text: str | None = None,
     ) -> None:
-        """Envío común HOME/P1-P3/TRAYECTORIA/PUNTO: comprueba, envía y sigue.
+        """Envío común HOME/P1-P3/TRAYECTORIA/PUNTO: asegura controlador y sigue.
 
-        Comparte el flujo asíncrono (controller 'active' -> send_goal_async
-        -> aceptado -> get_result_async -> resultado real) y garantiza que
-        solo haya un movimiento en curso a la vez (_motion_active).
-        'fail_text', si se da, personaliza el mensaje/estado de fallo (por
-        defecto se usa el formato genérico '<TAG> FALLÓ: <código>').
+        Antes de enviar el goal garantiza estar en modo TRAYECTORIA
+        (joint_trajectory_controller activo, forward_velocity_controller
+        desactivado) cambiando controladores si hiciera falta y, solo cuando
+        el cambio se confirma, lanza send_goal_async. 'fail_text', si se da,
+        personaliza el mensaje/estado de fallo.
         """
         if self._motion_active:
             return
-        if (
-            self._ros_node is None
-            or self._action_client is None
-            or self._list_controllers_client is None
-        ):
+        if self._ros_node is None or self._action_client is None or self._ctrl is None:
             print(f"[GUI] {tag} sin ROS (placeholder)")
             return
 
@@ -1483,84 +1557,43 @@ class MainWindow(QMainWindow):
         button.setEnabled(False)  # evita goals simultáneos
         self._pause_status_poll()
         self._log("info", f"{tag}: solicitando movimiento...")
-        self._set_status(f"● {tag}: COMPROBANDO CONTROLLER...", _AZUL)
+        self._set_status(f"● {tag}: PREPARANDO CONTROLADOR...", _AZUL)
 
-        # Antes de enviar: exigir joint_trajectory_controller 'active'.
-        if not self._list_controllers_client.service_is_ready():
-            self._finish_motion(
-                f"● {tag}: NO SE PUEDE VERIFICAR EL CONTROLLER", _ROJO
+        def _tras_switch(ok: bool, message: str) -> None:
+            if self._stop_requested:
+                self._log("warning", f"{tag}: STOP antes de enviar el goal")
+                self._finish_motion(
+                    "● MOVIMIENTO DETENIDO (goal no enviado)", _AMARILLO
+                )
+                return
+            if not ok:
+                self._log(
+                    "error",
+                    f"{tag}: joint_trajectory_controller no activo ({message})",
+                )
+                self._finish_motion(
+                    fail_text
+                    and f"● {fail_text} (controller no activo)"
+                    or f"● {tag}: CONTROLLER NO ACTIVO ({message})",
+                    _ROJO,
+                )
+                return
+            if not self._action_client.server_is_ready():
+                self._finish_motion(f"● {tag}: ACTION SERVER NO DISPONIBLE", _ROJO)
+                return
+            self._set_status(moving_text, _AZUL)
+            self._ros_node.get_logger().info(
+                f"{tag}: enviando goal a "
+                f"{[float(v) for v in goal.trajectory.points[0].positions]}."
             )
-            return
-        try:
-            future = self._list_controllers_client.call_async(
-                _LIST_CONTROLLERS_SRV.Request()
-            )
-            future.add_done_callback(
-                lambda fut: self._on_motion_controller_check(
-                    fut,
-                    goal=goal,
-                    button=button,
-                    moving_text=moving_text,
-                    ok_text=ok_text,
-                    tag=tag,
-                    fail_text=fail_text,
+            goal_future = self._action_client.send_goal_async(goal)
+            goal_future.add_done_callback(
+                lambda fut: self._on_motion_goal_response(
+                    fut, button=button, ok_text=ok_text, tag=tag, fail_text=fail_text
                 )
             )
-        except Exception as exc:  # noqa: BLE001 - no romper la GUI
-            self._finish_motion(f"● {tag}: ERROR AL VERIFICAR ({exc})", _ROJO)
 
-    def _on_motion_controller_check(
-        self,
-        future,
-        *,
-        goal: FollowJointTrajectory.Goal,
-        button,
-        moving_text: str,
-        ok_text: str,
-        tag: str,
-        fail_text: str | None = None,
-    ) -> None:
-        """Solo envía el goal si joint_trajectory_controller está 'active'."""
-        if self._stop_requested:
-            self._log("warning", f"{tag}: STOP antes de enviar el goal")
-            self._finish_motion("● MOVIMIENTO DETENIDO (goal no enviado)", _AMARILLO)
-            return
-        try:
-            response = future.result()
-        except Exception as exc:  # noqa: BLE001 - no romper la GUI
-            self._finish_motion(f"● {tag}: ERROR AL VERIFICAR ({exc})", _ROJO)
-            return
-
-        estado = None
-        for ctrl in response.controller:
-            if ctrl.name == _JTC_CONTROLLER_NAME:
-                estado = ctrl.state
-                break
-        if estado != "active":
-            self._log("error", f"{tag}: controller {estado or 'NO ENCONTRADO'}")
-            self._finish_motion(
-                fail_text
-                and f"● {fail_text} (controller {estado or 'NO ENCONTRADO'})"
-                or f"● {tag}: CONTROLLER {estado or 'NO ENCONTRADO'} (se requiere active)",
-                _ROJO,
-            )
-            return
-
-        if not self._action_client.server_is_ready():
-            self._finish_motion(f"● {tag}: ACTION SERVER NO DISPONIBLE", _ROJO)
-            return
-
-        self._set_status(moving_text, _AZUL)
-        self._ros_node.get_logger().info(
-            f"{tag}: enviando goal a "
-            f"{[float(v) for v in goal.trajectory.points[0].positions]}."
-        )
-        goal_future = self._action_client.send_goal_async(goal)
-        goal_future.add_done_callback(
-            lambda fut: self._on_motion_goal_response(
-                fut, button=button, ok_text=ok_text, tag=tag, fail_text=fail_text
-            )
-        )
+        self._switch_to_mode("trayectoria", after=_tras_switch, reason=f"goal {tag}")
 
     # ── Construcción del goal y seguimiento asíncrono ─────────────────
     def _build_single_goal(
@@ -1786,7 +1819,7 @@ class MainWindow(QMainWindow):
         if (
             self._ros_node is None
             or self._action_client is None
-            or self._list_controllers_client is None
+            or self._ctrl is None
         ):
             print("[GUI] EJECUTAR TRAYECTORIA presionado (sin ROS: placeholder)")
             return
@@ -1810,9 +1843,20 @@ class MainWindow(QMainWindow):
             fail_text="TRAYECTORIA: MOVIMIENTO FALLIDO",
         )
 
-    # ── STOP (cancelación del goal activo; el controller sigue 'active') ─
+    # ── STOP (control manual o trayectoria: robot quieto) ──────────────────
     def _on_stop(self):
-        """Detiene el movimiento en curso cancelando el goal de la acción."""
+        """Detiene el movimiento en curso.
+
+        - Si el control manual está ACTIVO (o activándose): Twist=0 y cambio
+          de controlador VOLVER A TRAYECTORIA (deja el JTC listo para HOME/P1-P3).
+        - Si hay un goal de trayectoria activo: lo cancela.
+        """
+        if self._manual_active:
+            self._log(
+                "warning", "STOP: desactivando control manual y volviendo a TRAYECTORIA"
+            )
+            self._on_manual_toggle(False)
+            return
         if not self._motion_active:
             self._set_status("● SIN MOVIMIENTO EN CURSO", _GRIS_CLR)
             self._log("info", "STOP: no hay movimiento en curso")
@@ -1893,7 +1937,10 @@ def main():
         window.show()
         rc = app.exec()
     finally:
-        node.destroy_node()
+        try:
+            node.destroy_node()
+        except Exception:  # noqa: BLE001 - el contexto pudo cerrarse ya (SIGINT)
+            pass
         if rclpy.ok():
             rclpy.shutdown()
     sys.exit(rc)

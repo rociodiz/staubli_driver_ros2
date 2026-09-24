@@ -179,6 +179,7 @@ def generate_launch_description():
     camera_image_bridge = Node(
         package="ros_gz_bridge",
         executable="parameter_bridge",
+        name="camera_image_bridge",
         arguments=["/camera/image_raw@sensor_msgs/msg/Image[gz.msgs.Image"],
         output="screen",
     )
@@ -223,6 +224,7 @@ def generate_launch_description():
             "-c", "/controller_manager",
             "--controller-manager-timeout", "30",
             "--param-file", controllers_yaml,
+            "--inactive",
         ],
         output="screen",
     )
