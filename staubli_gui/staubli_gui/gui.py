@@ -169,6 +169,10 @@ _HOME_GOAL_TOL_VEL = 0.05
 _HOME_GOAL_TOL_ACC = 0.1
 _HOME_GOAL_TIME_TOL_S = 2.5
 _HOME_STATUS_HOLD_MS = 2500  # mantener "HOME COMPLETADO" antes de volver al indicador
+# Tolerancia (rad) para considerar un waypoint "completado" en el feedback del
+# goal de trayectoria. Es SOLO visual (la GUI no decide el movimiento): cuando
+# feedback.desired coincide con las q de un waypoint se muestra "✓ name completado".
+_WAYPOINT_FEEDBACK_TOL = 0.02
 # Códigos de resultado del FollowJointTrajectoryResult (misma semántica que
 # joint_trajectory_client._RESULT_CODES en staubli_trajectory).
 _HOME_RESULT_CODES = {
@@ -364,6 +368,7 @@ class MainWindow(QMainWindow):
         self._action_client: ActionClient | None = None
         self._motion_goal_handle = None
         self._motion_active = False  # exclusividad HOME + P1-P3 + TRAYECTORIA
+        self._wp_pending: list[tuple[str, list[float]]] | None = None  # feedback por puntos
         self._stop_requested = False  # STOP: distingue cancelación vs. éxito
         self._motion_button = None
         self._point_plan = None
@@ -1113,7 +1118,7 @@ class MainWindow(QMainWindow):
             goal=goal,
             button=self.btn_home,
             moving_text="MOVIENDO A HOME...",
-            ok_text="HOME COMPLETADO",
+            ok_text="HOME completado",
             tag="HOME",
         )
 
@@ -1151,7 +1156,7 @@ class MainWindow(QMainWindow):
             goal=goal,
             button=btn,
             moving_text=f"MOVIENDO A {name}...",
-            ok_text=f"{name} ALCANZADO",
+            ok_text=f"{name} completado",
             tag=name,
         )
 
@@ -1584,7 +1589,7 @@ class MainWindow(QMainWindow):
             goal=goal,
             button=self.btn_move_point,
             moving_text=f"MOVIENDO A {point.name}...",
-            ok_text=f"{point.name} ALCANZADO",
+            ok_text=f"{point.name} completado",
             tag=point.name,
             fail_text=f"{point.name}: MOVIMIENTO FALLIDO",
         )
@@ -1598,6 +1603,7 @@ class MainWindow(QMainWindow):
         ok_text: str,
         tag: str,
         fail_text: str | None = None,
+        waypoints: list[tuple[str, list[float]]] | None = None,
     ) -> None:
         """Envío común HOME/P1-P3/TRAYECTORIA/PUNTO: asegura controlador y sigue.
 
@@ -1606,6 +1612,10 @@ class MainWindow(QMainWindow):
         desactivado) cambiando controladores si hiciera falta y, solo cuando
         el cambio se confirma, lanza send_goal_async. 'fail_text', si se da,
         personaliza el mensaje/estado de fallo.
+
+        'waypoints', si se da (puntos de usuario de una trayectoria), activa
+        el feedback del goal: cada punto alcanzado se marca como completado
+        en el panel de mensajes (solo visual, sin enviar nada al robot).
         """
         if self._motion_active:
             return
@@ -1614,6 +1624,7 @@ class MainWindow(QMainWindow):
             return
 
         self._motion_active = True
+        self._wp_pending = list(waypoints) if waypoints else None
         self._motion_button = button
         button.setEnabled(False)  # evita goals simultáneos
         self._pause_status_poll()
@@ -1647,7 +1658,10 @@ class MainWindow(QMainWindow):
                 f"{tag}: enviando goal a "
                 f"{[float(v) for v in goal.trajectory.points[0].positions]}."
             )
-            goal_future = self._action_client.send_goal_async(goal)
+            feedback_cb = self._on_motion_feedback if self._wp_pending else None
+            goal_future = self._action_client.send_goal_async(
+                goal, feedback_callback=feedback_cb
+            )
             goal_future.add_done_callback(
                 lambda fut: self._on_motion_goal_response(
                     fut, button=button, ok_text=ok_text, tag=tag, fail_text=fail_text
@@ -1745,6 +1759,42 @@ class MainWindow(QMainWindow):
             )
         )
 
+    def _on_motion_feedback(self, feedback_msg) -> None:
+        """Marca cada punto de la trayectoria como completado (solo visual).
+
+        Compara la posición deseada (feedback.desired, el punto exacto que el
+        joint_trajectory_controller está siguiendo) con el siguiente waypoint
+        pendiente; al coincidir (dentro de _WAYPOINT_FEEDBACK_TOL) registra
+        "✓ <name> completado" en el panel. Se usa 'desired' (y no la posición
+        medida 'actual') porque la referencia atraviesa exactamente cada
+        waypoint del goal, mientras que la posición medida puede no llegar a
+        coincidir dentro de la tolerancia. No envía nada al robot: la GUI solo
+        muestra el progreso del goal multi-waypoint (que reporta un único
+        resultado al final).
+        """
+        if not self._motion_active or not self._wp_pending:
+            return
+        feedback = getattr(feedback_msg, "feedback", None)
+        if feedback is None:
+            return
+        desired = list(getattr(feedback.desired, "positions", []) or [])
+        while self._wp_pending:
+            name, positions = self._wp_pending[0]
+            if len(positions) != len(desired) or any(
+                abs(a - d) > _WAYPOINT_FEEDBACK_TOL
+                for a, d in zip(desired, positions)
+            ):
+                break
+            self._wp_pending.pop(0)
+            self._log("ok", f"{name} completado")
+            siguiente = self._wp_pending[0][0] if self._wp_pending else None
+            if siguiente is not None:
+                self._set_status(
+                    f"● ✓ {name} completado → siguiente: {siguiente}", _VERDE
+                )
+            else:
+                self._set_status(f"● ✓ {name} completado (último punto)", _VERDE)
+
     def _on_motion_result(
         self, future, *, ok_text: str, tag: str, fail_text: str | None = None
     ) -> None:
@@ -1770,7 +1820,7 @@ class MainWindow(QMainWindow):
             return
 
         if error_code == _HOME_MSG.Result.SUCCESSFUL:
-            self._log("ok", f"{tag}: {ok_text}")
+            self._log("ok", ok_text)
             self._finish_motion(f"● {ok_text}", _VERDE)
             return
 
@@ -1787,16 +1837,19 @@ class MainWindow(QMainWindow):
                 "● MOVIMIENTO DETENIDO (controller desactivado)", _AMARILLO
             )
             return
+        # Si había puntos pendientes, se indica cuál no se alcanzó.
+        fallo = self._wp_pending[0][0] if self._wp_pending else tag
         detalle = f"{nombre}" + (f" — {error_string}" if error_string else "")
-        self._log("error", f"{tag}: goal FALLÓ ({detalle})")
+        self._log("error", f"{fallo}: FALLÓ ({detalle})")
         self._finish_motion(
-            fail_text and f"● {fail_text}" or f"● {tag} FALLÓ: {nombre}", _ROJO
+            fail_text and f"● {fail_text}" or f"● {fallo}: FALLÓ ({nombre})", _ROJO
         )
 
     def _finish_motion(self, status_text: str, color: str) -> None:
         """Restaura botón y sondeo de estado al terminar (o fallar) un goal."""
         self._motion_active = False
         self._motion_goal_handle = None
+        self._wp_pending = None
         self._stop_requested = False
         if self._motion_button is not None:
             self._motion_button.setEnabled(True)
@@ -1899,9 +1952,10 @@ class MainWindow(QMainWindow):
             goal=goal,
             button=self.btn_run,
             moving_text="EJECUTANDO TRAYECTORIA...",
-            ok_text="TRAYECTORIA COMPLETADA",
+            ok_text="Trayectoria completada",
             tag="TRAYECTORIA",
             fail_text="TRAYECTORIA: MOVIMIENTO FALLIDO",
+            waypoints=[(p.name, list(p.q)) for p in resolved],
         )
 
     # ── STOP (control manual o trayectoria: robot quieto) ──────────────────
