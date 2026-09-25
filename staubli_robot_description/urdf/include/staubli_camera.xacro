@@ -29,6 +29,9 @@
         width:=640
         height:=480
         hfov:=1.0472
+        laser_distance:='0.50'
+        laser_width:='0.30'
+        laser_line_width:='0.008'
     ">
         <!-- Camera mount link (eye-in-hand) -->
 
@@ -45,6 +48,43 @@
                 </geometry>
                 <material name="camera_material">
                     <color rgba="0.15 0.15 0.15 1"/>
+                </material>
+            </visual>
+            <visual name="camera_housing_visual">
+                <geometry>
+                    <box size="0.06 0.05 0.045"/>
+                </geometry>
+                <material name="camera_housing_material">
+                    <color rgba="0.08 0.10 0.12 1"/>
+                </material>
+            </visual>
+            <visual name="camera_lens_visual">
+                <origin xyz="0.032 0 0" rpy="0 1.57079632679 0"/>
+                <geometry>
+                    <cylinder radius="0.016" length="0.008"/>
+                </geometry>
+                <material name="camera_lens_material">
+                    <color rgba="0.02 0.04 0.08 1"/>
+                </material>
+            </visual>
+            <visual name="laser_triangle_visual">
+                <origin xyz="0 0 0" rpy="0 0 0"/>
+                <geometry>
+                    <mesh
+                        filename="package://staubli_robot_description/meshes/laser_triangle.obj"
+                        scale="${laser_distance} ${laser_width} 1.0"/>
+                </geometry>
+                <material name="laser_triangle_material">
+                    <color rgba="0.10 0.70 1.0 0.25"/>
+                </material>
+            </visual>
+            <visual name="laser_line_visual">
+                <origin xyz="${laser_distance} 0 0" rpy="0 0 0"/>
+                <geometry>
+                    <box size="${laser_line_width} ${laser_width} ${laser_line_width}"/>
+                </geometry>
+                <material name="laser_line_material">
+                    <color rgba="1.0 0.0 0.0 0.95"/>
                 </material>
             </visual>
         </link>

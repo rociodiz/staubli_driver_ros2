@@ -13,6 +13,9 @@
     <xacro:arg name="name" default="staubli"/>
     <xacro:arg name="robot_prefix" default=""/>
     <xacro:arg name="robot_ip" default="0.0.0.0"/>
+    <xacro:arg name="laser_distance" default="0.50"/>
+    <xacro:arg name="laser_width" default="0.30"/>
+    <xacro:arg name="laser_line_width" default="0.008"/>
 
     <!-- Set the robot name using the property -->
     <xacro:attribute name="name" value="$(arg name)" />
@@ -79,6 +82,9 @@
     <xacro:staubli_camera
         robot_prefix="$(arg robot_prefix)"
         parent_link="$(arg robot_prefix)link_6"
+        laser_distance="$(arg laser_distance)"
+        laser_width="$(arg laser_width)"
+        laser_line_width="$(arg laser_line_width)"
     />
 
     <!-- ROS2 control description -->
