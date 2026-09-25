@@ -78,11 +78,13 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLayout,
     QLineEdit,
     QListWidget,
     QMainWindow,
     QPlainTextEdit,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -417,19 +419,28 @@ class MainWindow(QMainWindow):
         top_box = _make_box("Control del robot")
         top_box.setFixedHeight(58)
         hb = QHBoxLayout(top_box)
-        hb.setContentsMargins(10, 2, 10, 4)
-        hb.setSpacing(12)
+        hb.setContentsMargins(10, 2, 10, 6)
+        hb.setSpacing(6)
         self._status_label = QLabel("● CONECTANDO...")
         self._status_label.setStyleSheet(_label_style(_GRIS_MED, _FAMILIA, 13))
         self._status_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
-        hb.addWidget(self._status_label)
-        hb.addSpacing(18)
-        self.btn_enable = _make_btn("ENABLE", _btn_style(_VERDE, min_h=30))
-        self.btn_disable = _make_btn("DISABLE", _btn_style(_GRIS_MED, min_h=30))
+        self._status_label.setMinimumWidth(315)
+        self._status_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        hb.addWidget(self._status_label, 1)
+        self.btn_enable = _make_btn(
+            "ENABLE", _btn_style(_VERDE, font_size=12, min_h=24, pad="2px 6px")
+        )
+        self.btn_disable = _make_btn(
+            "DISABLE", _btn_style(_GRIS_MED, font_size=12, min_h=24, pad="2px 6px")
+        )
+        self.btn_enable.setFixedSize(68, 30)
+        self.btn_disable.setFixedSize(74, 30)
         hb.addWidget(self.btn_enable)
         hb.addWidget(self.btn_disable)
-        hb.addStretch()
-        self.btn_home = _make_btn("HOME", _btn_style(_AZUL, min_w=110, min_h=30))
+        self.btn_home = _make_btn(
+            "HOME", _btn_style(_AZUL, font_size=12, min_h=24, pad="2px 6px")
+        )
+        self.btn_home.setFixedSize(56, 30)
         hb.addWidget(self.btn_home)
         right.addWidget(top_box)
 
@@ -456,6 +467,17 @@ class MainWindow(QMainWindow):
         # controller JTC -> forward_velocity_controller queda pendiente).
         self._frame_panel = FrameControlPanel()
         self._frame_panel.toggled.connect(self._on_manual_toggle)
+        manual_layout = self._frame_panel.layout()
+        summary_layout = manual_layout.itemAt(manual_layout.count() - 1).layout()
+        summary_layout.setSizeConstraint(QLayout.SetFixedSize)
+        for valor in self._frame_panel._summary_labels.values():
+            valor.setStyleSheet(
+                f"color: {_GRIS_CLR}; font-family: {_FAM_MONO};"
+                f" font-size: 12px; background-color: {_NEGRO};"
+                f" border: 1px solid {_GRIS_MED}; border-radius: 3px;"
+                f" padding: 1px 3px; min-width: 40px; max-width: 40px;"
+            )
+            valor.setFixedSize(48, 24)
         left.addWidget(self._frame_panel, 4)
 
         # ── GUARDAR POSICIÓN ACTUAL (captura J1-J6 reales como punto) ────
@@ -500,12 +522,22 @@ class MainWindow(QMainWindow):
         v_puntos.setSpacing(4)
         hb_puntos = QHBoxLayout()
         hb_puntos.setSpacing(8)
-        self.btn_p1 = _make_btn("P1", _btn_style(_GRIS_MED, min_w=54, min_h=30))
-        self.btn_p2 = _make_btn("P2", _btn_style(_GRIS_MED, min_w=54, min_h=30))
-        self.btn_p3 = _make_btn("P3", _btn_style(_GRIS_MED, min_w=54, min_h=30))
+        self.btn_p1 = _make_btn(
+            "P1", _btn_style(_GRIS_MED, font_size=12, min_w=46, min_h=24, pad="3px 8px")
+        )
+        self.btn_p2 = _make_btn(
+            "P2", _btn_style(_GRIS_MED, font_size=12, min_w=46, min_h=24, pad="3px 8px")
+        )
+        self.btn_p3 = _make_btn(
+            "P3", _btn_style(_GRIS_MED, font_size=12, min_w=46, min_h=24, pad="3px 8px")
+        )
+        for button in (self.btn_p1, self.btn_p2, self.btn_p3):
+            button.setFixedSize(58, 30)
+        hb_puntos.addStretch()
         hb_puntos.addWidget(self.btn_p1)
         hb_puntos.addWidget(self.btn_p2)
         hb_puntos.addWidget(self.btn_p3)
+        hb_puntos.addStretch()
         v_puntos.addLayout(hb_puntos)
         right.addWidget(insp_box)
         # ── PUNTOS DEL USUARIO (lista + acciones) ─────────────────────
@@ -520,33 +552,36 @@ class MainWindow(QMainWindow):
             f"QListWidget::item {{ padding: 3px 6px; }}"
             f"QListWidget::item:selected {{ background-color: {_AZUL}; }}"
         )
-        self._points_list.setMinimumHeight(56)
-        v_user.addWidget(self._points_list)
-        up_btns = QGridLayout()
-        up_btns.setHorizontalSpacing(8)
-        up_btns.setVerticalSpacing(6)
-        up_btns.setColumnStretch(4, 1)
+        self._points_list.setMinimumHeight(90)
+        v_user.addWidget(self._points_list, 1)
+        up_btns = QHBoxLayout()
+        up_btns.setContentsMargins(0, 0, 0, 0)
+        up_btns.setSpacing(4)
         self.btn_new_point = _make_btn(
-            "NUEVO PUNTO", _btn_style(_AZUL, font_size=11, min_h=28, pad="4px 10px")
+            "NUEVO PUNTO", _btn_style(_AZUL, font_size=11, min_h=28, pad="4px 8px")
         )
         self.btn_edit_point = _make_btn(
-            "EDITAR", _btn_style(_GRIS_MED, font_size=11, min_h=28, pad="4px 10px")
+            "EDITAR", _btn_style(_GRIS_MED, font_size=11, min_h=28, pad="4px 8px")
         )
         self.btn_delete_point = _make_btn(
-            "ELIMINAR", _btn_style(_ROJO, font_size=11, min_h=28, pad="4px 10px")
+            "ELIMINAR", _btn_style(_ROJO, font_size=11, min_h=28, pad="4px 8px")
         )
         self.btn_move_point = _make_btn(
-            "MOVER A PUNTO", _btn_style(_VERDE, font_size=11, min_h=28, pad="4px 10px")
+            "MOVER A PUNTO", _btn_style(_VERDE, font_size=11, min_h=28, pad="4px 8px")
         )
         self.btn_add_to_traj = _make_btn(
             "AÑADIR A TRAYECTORIA",
-            _btn_style(_AZUL, font_size=11, min_h=28, pad="4px 10px"),
+            _btn_style(_AZUL, font_size=11, min_h=28, pad="4px 8px"),
         )
-        up_btns.addWidget(self.btn_new_point, 0, 0)
-        up_btns.addWidget(self.btn_edit_point, 0, 1)
-        up_btns.addWidget(self.btn_delete_point, 0, 2)
-        up_btns.addWidget(self.btn_move_point, 1, 0)
-        up_btns.addWidget(self.btn_add_to_traj, 1, 1, 1, 2)
+        for button in (
+            self.btn_new_point,
+            self.btn_edit_point,
+            self.btn_delete_point,
+            self.btn_move_point,
+            self.btn_add_to_traj,
+        ):
+            button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            up_btns.addWidget(button, 1)
         v_user.addLayout(up_btns)
         self.btn_edit_point.setEnabled(False)
         self.btn_delete_point.setEnabled(False)
@@ -566,10 +601,11 @@ class MainWindow(QMainWindow):
             f"QListWidget::item {{ padding: 3px 6px; }}"
             f"QListWidget::item:selected {{ background-color: {_AZUL}; }}"
         )
-        self._trajectory_list.setMinimumHeight(56)
-        v_traj.addWidget(self._trajectory_list)
+        self._trajectory_list.setMinimumHeight(90)
+        v_traj.addWidget(self._trajectory_list, 1)
         tuv_btns = QHBoxLayout()
-        tuv_btns.setSpacing(8)
+        tuv_btns.setContentsMargins(0, 0, 0, 0)
+        tuv_btns.setSpacing(4)
         self.btn_traj_up = _make_btn(
             "↑", _btn_style(_GRIS_MED, font_size=12, min_h=28, min_w=38, pad="2px 8px")
         )
@@ -577,10 +613,10 @@ class MainWindow(QMainWindow):
             "↓", _btn_style(_GRIS_MED, font_size=12, min_h=28, min_w=38, pad="2px 8px")
         )
         self.btn_traj_remove = _make_btn(
-            "QUITAR", _btn_style(_ROJO, font_size=11, min_h=28, pad="4px 10px")
+            "QUITAR", _btn_style(_ROJO, font_size=11, min_h=28, pad="4px 8px")
         )
         self.btn_traj_clear = _make_btn(
-            "LIMPIAR", _btn_style(_GRIS_MED, font_size=11, min_h=28, pad="4px 10px")
+            "LIMPIAR", _btn_style(_GRIS_MED, font_size=11, min_h=28, pad="4px 8px")
         )
         tuv_btns.addWidget(self.btn_traj_up)
         tuv_btns.addWidget(self.btn_traj_down)

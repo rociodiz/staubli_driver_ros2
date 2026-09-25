@@ -197,7 +197,7 @@ class FrameControlPanel(QGroupBox):
             f"color: {_GRIS_CLR}; font-family: {_FAMILIA}; font-size: 11px;"
             f" font-weight: bold;"
         )
-        gain_lbl.setAlignment(Qt.AlignHCenter)
+        gain_lbl.setAlignment(Qt.AlignHCenter | Qt.AlignBottom)
         self._gain = QDoubleSpinBox()
         self._gain.setRange(0.10, 2.00)
         self._gain.setSingleStep(0.05)
@@ -223,7 +223,7 @@ class FrameControlPanel(QGroupBox):
             f"color: {_GRIS_CLR}; font-family: {_FAMILIA}; font-size: 11px;"
             f" font-weight: bold;"
         )
-        vel_lbl.setAlignment(Qt.AlignHCenter)
+        vel_lbl.setAlignment(Qt.AlignHCenter | Qt.AlignBottom)
         self._vel = QSlider(Qt.Horizontal)
         self._vel.setRange(0, 100)
         self._vel.setValue(50)
