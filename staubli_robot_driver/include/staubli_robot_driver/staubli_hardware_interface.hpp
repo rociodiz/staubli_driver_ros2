@@ -14,6 +14,8 @@
 //
 // Author: Thibault Poignonec (thibault.poignonec@gmail.fr)
 
+// Interfaz entre ROS 2 Control y el driver del robot Staubli.
+
 #ifndef STAUBLI_ROBOT_DRIVER__STAUBLI_HARDWARE_INTERFACE_HPP_
 #define STAUBLI_ROBOT_DRIVER__STAUBLI_HARDWARE_INTERFACE_HPP_
 

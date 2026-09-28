@@ -14,6 +14,8 @@
 //
 // Author: Thibault Poignonec (thibault.poignonec@gmail.fr)
 
+// Interfaz de comunicación de red y creación de sockets UDP/TCP.
+
 #ifndef STAUBLI_ROBOT_DRIVER__COMMUNICATION__SOCKET_HPP_
 #define STAUBLI_ROBOT_DRIVER__COMMUNICATION__SOCKET_HPP_
 

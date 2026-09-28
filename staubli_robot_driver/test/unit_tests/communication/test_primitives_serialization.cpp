@@ -14,6 +14,9 @@
 //
 // Author: Thibault Poignonec (thibault.poignonec@gmail.fr)
 
+// Pruebas unitarias de las funciones de serialización y deserialización utilizadas por el protocolo de comunicación.
+// Comprueba tipos básicos y arrays, incluyendo la conversión de double a float.
+
 #include <gtest/gtest.h>
 
 #include "staubli_robot_driver/communication/serialization.hpp"

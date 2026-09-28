@@ -14,6 +14,8 @@
 //
 // Author: Thibault Poignonec (thibault.poignonec@gmail.fr)
 
+// Implementa la serialización y deserialización del protocolo de comunicación.
+
 
 #include <arpa/inet.h>  // For htonl, htons, etc.
 

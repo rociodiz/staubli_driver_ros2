@@ -14,6 +14,8 @@
 //
 // Author: Thibault Poignonec (thibault.poignonec@gmail.fr)
 
+// Define la estructura y las reglas del protocolo de comunicación con el robot.
+
 #ifndef STAUBLI_ROBOT_DRIVER__COMMUNICATION__PROTOCOL_HPP_
 #define STAUBLI_ROBOT_DRIVER__COMMUNICATION__PROTOCOL_HPP_
 

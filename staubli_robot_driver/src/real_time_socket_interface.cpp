@@ -14,6 +14,8 @@
 //
 // Author: Thibault Poignonec (thibault.poignonec@gmail.fr)
 
+// Implementa el envío de mensajes del robot mediante la comunicación por socket.
+
 #include "staubli_robot_driver/real_time_socket_interface.hpp"
 
 #include <iostream>

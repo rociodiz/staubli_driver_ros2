@@ -14,6 +14,8 @@
 //
 // Author: Thibault Poignonec (thibault.poignonec@gmail.fr)
 
+// Interfaz principal para la comunicación y control del robot Staubli.
+
 
 #ifndef STAUBLI_ROBOT_DRIVER__ROBOT_DRIVER_HPP_
 #define STAUBLI_ROBOT_DRIVER__ROBOT_DRIVER_HPP_

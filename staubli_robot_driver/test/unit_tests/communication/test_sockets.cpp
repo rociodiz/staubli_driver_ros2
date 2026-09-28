@@ -14,6 +14,9 @@
 //
 // Author: Thibault Poignonec (thibault.poignonec@gmail.fr)
 
+// Pruebas unitarias de las funciones de serialización y deserialización de tipos y arrays.
+// Comprueba que los datos se convierten correctamente a bytes y se recuperan sin errores.
+
 #include <gtest/gtest.h>
 #include <future>
 #include <memory>

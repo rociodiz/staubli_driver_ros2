@@ -14,6 +14,9 @@
 //
 // Author: Thibault Poignonec (thibault.poignonec@gmail.fr)
 
+// Implementación preparada para la comunicación TCP.
+// Actualmente TCP no está implementado; el driver utiliza UDP.
+
 #include "staubli_robot_driver/communication/tcp_socket.hpp"
 #include "tcp_socket_impl.hpp"
 

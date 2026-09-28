@@ -14,6 +14,9 @@
 //
 // Author: Thibault Poignonec (thibault.poignonec@gmail.fr)
 
+// Interfaz de comunicación UDP del driver.
+// UDPSocket delega la implementación real en UDPSocketImpl.
+
 #ifndef STAUBLI_ROBOT_DRIVER__COMMUNICATION__UDP_SOCKET_HPP_
 #define STAUBLI_ROBOT_DRIVER__COMMUNICATION__UDP_SOCKET_HPP_
 

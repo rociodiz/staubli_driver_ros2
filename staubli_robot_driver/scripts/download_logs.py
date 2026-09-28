@@ -16,7 +16,7 @@
 #
 # Author: Thibault Poignonec (thibault.poignonec@gmail.fr)
 
-"""Minimalist helper script to transfer the VAL3 scripts to the robot."""
+"""Script auxiliar para conectarse al robot Staubli mediante FTP y descargar sus logs."""
 
 from staubli_robot_driver.staubli_ftp import StaubliFTP
 from staubli_robot_driver.staubli_ftp_utils import download_logs

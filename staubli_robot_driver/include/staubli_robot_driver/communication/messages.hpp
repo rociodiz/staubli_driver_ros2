@@ -14,6 +14,8 @@
 //
 // Author: Thibault Poignonec (thibault.poignonec@gmail.fr)
 
+// Define los mensajes utilizados para intercambiar estados, comandos y diagnósticos con el robot.
+
 #ifndef STAUBLI_ROBOT_DRIVER__COMMUNICATION__MESSAGES_HPP_
 #define STAUBLI_ROBOT_DRIVER__COMMUNICATION__MESSAGES_HPP_
 

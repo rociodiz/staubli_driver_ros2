@@ -14,6 +14,8 @@
 //
 // Author: Thibault Poignonec (thibault.poignonec@gmail.fr)
 
+// Prueba básica de recepción y envío de datos mediante UDP con el robot.
+
 #include <iostream>
 #include <chrono>
 #include <thread>

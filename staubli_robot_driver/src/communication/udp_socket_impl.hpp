@@ -14,6 +14,8 @@
 //
 // Author: Thibault Poignonec (thibault.poignonec@gmail.fr)
 
+//Implementación interna del socket UDP mediante Boost.Asio.
+//Gestiona las operaciones de comunicación UDP, como conexión, envío, recepción y recepción en segundo plano.
 
 #ifndef COMMUNICATION__UDP_SOCKET_IMPL_HPP_
 #define COMMUNICATION__UDP_SOCKET_IMPL_HPP_

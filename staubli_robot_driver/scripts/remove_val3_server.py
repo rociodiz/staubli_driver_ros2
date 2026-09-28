@@ -16,7 +16,7 @@
 #
 # Author: Thibault Poignonec (thibault.poignonec@gmail.fr)
 
-"""Minimalist helper script to remove the VAL3 scripts from the robot."""
+"""Script auxiliar para eliminar del robot la aplicación VAL3 ros2_server mediante FTP."""
 
 from staubli_robot_driver.staubli_ftp import StaubliFTP
 

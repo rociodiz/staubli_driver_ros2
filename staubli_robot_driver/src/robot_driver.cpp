@@ -14,6 +14,8 @@
 //
 // Author: Thibault Poignonec (thibault.poignonec@gmail.fr)
 
+// Comunicación con el robot Staubli: conexión, comandos y recepción de estados.
+
 #include "staubli_robot_driver/robot_driver.hpp"
 #include "staubli_robot_driver/robot_driver_helpers.hpp"
 

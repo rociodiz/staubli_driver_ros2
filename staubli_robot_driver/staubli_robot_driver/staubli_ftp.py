@@ -15,7 +15,8 @@
 #
 # Author: Thibault Poignonec (thibault.poignonec@gmail.fr)
 
-"""Minimalist helper to transfer VAL3 scripts and config files to the robot."""
+"""Cliente FTP basado en ROS 2 para conectarse al controlador Staubli y gestionar archivos y directorios remotos.
+Permite subir aplicaciones VAL3 y configuraciones, así como descargar archivos y logs del robot."""
 
 import ftplib
 import os

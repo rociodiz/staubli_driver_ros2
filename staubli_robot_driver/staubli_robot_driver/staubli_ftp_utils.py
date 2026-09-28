@@ -15,7 +15,8 @@
 #
 # Author: Thibault Poignonec (thibault.poignonec@gmail.fr)
 
-"""Minimalist helper script to transfer the VAL3 scripts to the robot."""
+"""Funciones auxiliares para la comunicación FTP con el robot Staubli.
+Permite descargar logs, subir aplicaciones VAL3 y actualizar la configuración SIO."""
 
 import os
 

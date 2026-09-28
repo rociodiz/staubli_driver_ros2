@@ -16,7 +16,8 @@
 #
 # Author: Thibault Poignonec (thibault.poignonec@gmail.fr)
 
-"""Minimalist helper script to transfer the VAL3 scripts to the robot."""
+"""Script auxiliar para instalar o actualizar en el robot la aplicación VAL3 ros2_server y su configuración SIO.
+Permite preparar la comunicación entre el controlador Staubli y el driver ROS 2."""
 
 import os
 

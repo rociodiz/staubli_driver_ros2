@@ -14,6 +14,9 @@
 //
 // Author: Thibault Poignonec (thibault.poignonec@gmail.fr)
 
+// Implementación de la interfaz de comunicación UDP.
+// UDPSocket delega las operaciones de red en UDPSocketImpl.
+
 #include "staubli_robot_driver/communication/udp_socket.hpp"
 #include "udp_socket_impl.hpp"
 

@@ -14,6 +14,8 @@
 //
 // Author: Thibault Poignonec (thibault.poignonec@gmail.fr)
 
+// Conversión de datos entre tipos C++ y bytes para la comunicación.
+
 #ifndef STAUBLI_ROBOT_DRIVER__COMMUNICATION__SERIALIZATION_HPP_
 #define STAUBLI_ROBOT_DRIVER__COMMUNICATION__SERIALIZATION_HPP_
 

@@ -14,6 +14,8 @@
 //
 // Author: Thibault Poignonec (thibault.poignonec@gmail.fr)
 
+// Interfaz del socket TCP del driver.
+
 #ifndef STAUBLI_ROBOT_DRIVER__COMMUNICATION__TCP_SOCKET_HPP_
 #define STAUBLI_ROBOT_DRIVER__COMMUNICATION__TCP_SOCKET_HPP_
 

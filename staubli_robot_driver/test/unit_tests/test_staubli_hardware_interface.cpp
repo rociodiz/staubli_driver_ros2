@@ -14,6 +14,9 @@
 //
 // Author: Thibault Poignonec (thibault.poignonec@gmail.fr)
 
+// Tests unitarios de la interfaz de hardware Staubli: inicialización,
+// configuración, pluginlib, interfaces de estado/mando y ciclo de vida.
+
 #include "test_staubli_hardware_interface.hpp"
 
 /**

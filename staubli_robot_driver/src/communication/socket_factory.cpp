@@ -14,7 +14,7 @@
 //
 // Author: Thibault Poignonec (thibault.poignonec@gmail.fr)
 
-
+// Selección y creación del tipo de socket utilizado por el driver.
 #include <stdexcept>
 #include <string>
 

@@ -14,14 +14,13 @@
 //
 // Author: Thibault Poignonec (thibault.poignonec@gmail.fr)
 
+// Tipos y estados utilizados por el driver del robot Staubli.
+
 #ifndef STAUBLI_ROBOT_DRIVER__TYPES_HPP_
 #define STAUBLI_ROBOT_DRIVER__TYPES_HPP_
 
 namespace staubli_robot_driver {
 
-/**
- * @brief Message types for communication
- */
 enum class MessageType : uint8_t {
     INVALID = 0x00,
     ROBOT_STATE = 0x01,
@@ -29,9 +28,6 @@ enum class MessageType : uint8_t {
     DIAGNOSTIC_DATA = 0x03
 };
 
-/**
- * @brief Command types
- */
 enum class CommandType : uint8_t {
     INVALID = 0x00,
     STOP = 0x01,
@@ -43,9 +39,6 @@ enum class CommandType : uint8_t {
     DECELERATION_JOINT_VELOCITY = 0x0B
 };
 
-/**
- * @brief Operation modes
- */
 enum class OperationMode : uint8_t {
     UNKNOWN = 0x00,
     MANUAL = 0x01,
@@ -53,9 +46,6 @@ enum class OperationMode : uint8_t {
     REMOTE = 0x03
 };
 
-// /**
-//  * @brief Operation mode statuses
-//  */
 // enum class OperationModeStatus : uint8_t {
 //     UNKNOWN = 0x00,
 //     PROGRAMMED_MOTION = 0x01,
@@ -68,9 +58,6 @@ enum class OperationMode : uint8_t {
 // };
 
 
-/**
- * @brief Safety status
- */
 enum class SafetyStatus : uint8_t {
     NO_SAFETY_STOP = 0x00,
     WAIT_FOR_RESTART = 0x01,
@@ -79,9 +66,6 @@ enum class SafetyStatus : uint8_t {
     WAIT_FOR_WMS = 0x04
 };
 
-/**
- * @brief Status flag (bit masks)
- */
 enum class StatusFlag : uint16_t {
     POWER_ON = 0x0001,
     BRAKES_RELEASED = 0x0002,
@@ -91,9 +75,6 @@ enum class StatusFlag : uint16_t {
     ESTOP_PRESSED = 0x0020,
 };
 
-/**
- * @brief Valid fields (bit masks)
- */
 enum class ValidFieldFlag : uint16_t {
     JOINT_POSITIONS = 0x0001,
     JOINT_VELOCITIES = 0x0002,

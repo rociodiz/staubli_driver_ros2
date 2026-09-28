@@ -14,6 +14,8 @@
 //
 // Author: Thibault Poignonec (thibault.poignonec@gmail.fr)
 
+// Implementa un robot simulado para probar el intercambio de comandos y estados.
+
 #include "staubli_robot_driver/mock_robot_server.hpp"
 #include "staubli_robot_driver/communication/socket.hpp"
 

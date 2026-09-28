@@ -14,6 +14,8 @@
 //
 // Author: Thibault Poignonec (thibault.poignonec@gmail.fr)
 
+//// Implementación de la interfaz entre ROS 2 Control y el driver Staubli.
+
 #include "staubli_robot_driver/staubli_hardware_interface.hpp"
 
 #include <cmath>

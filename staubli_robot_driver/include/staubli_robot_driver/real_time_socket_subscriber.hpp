@@ -14,6 +14,8 @@
 //
 // Author: Thibault Poignonec (thibault.poignonec@gmail.fr)
 
+// Recibe y gestiona mensajes del robot mediante un socket en tiempo real.
+
 #ifndef STAUBLI_ROBOT_DRIVER__REAL_TIME_SOCKET_SUBSCRIBER_HPP_
 #define STAUBLI_ROBOT_DRIVER__REAL_TIME_SOCKET_SUBSCRIBER_HPP_
 

@@ -14,6 +14,9 @@
 //
 // Author: Thibault Poignonec (thibault.poignonec@gmail.fr)
 
+// Infraestructura auxiliar para las pruebas de StaubliHardwareInterface,
+// incluyendo el robot simulado y la configuración mínima de hardware.
+
 #pragma once
 
 #include <gtest/gtest.h>

@@ -14,6 +14,9 @@
 //
 // Author: Thibault Poignonec (thibault.poignonec@gmail.fr)
 
+// Pruebas unitarias del servidor de robot simulado (MockRobotServer),
+// comprobando su construcción, inicialización, estado y comportamiento básico.
+
 #include <gtest/gtest.h>
 #include <memory>
 #include <string>

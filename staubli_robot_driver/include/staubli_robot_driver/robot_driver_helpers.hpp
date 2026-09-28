@@ -14,6 +14,7 @@
 //
 // Author: Thibault Poignonec (thibault.poignonec@gmail.fr)
 
+// Funciones auxiliares para preparar los comandos enviados al robot.
 
 #ifndef STAUBLI_ROBOT_DRIVER__ROBOT_DRIVER_HELPERS_HPP_
 #define STAUBLI_ROBOT_DRIVER__ROBOT_DRIVER_HELPERS_HPP_

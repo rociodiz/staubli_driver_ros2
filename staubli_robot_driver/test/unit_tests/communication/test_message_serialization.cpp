@@ -14,6 +14,8 @@
 //
 // Author: Thibault Poignonec (thibault.poignonec@gmail.fr)
 
+// Pruebas unitarias de la serialización y deserialización de los mensajes del protocolo de comunicación.
+// Comprueba cabeceras, estados, comandos, diagnósticos y validación del tamaño de los buffers.
 
 #include <gtest/gtest.h>
 #include <memory>

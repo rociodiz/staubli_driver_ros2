@@ -14,6 +14,8 @@
 //
 // Author: Thibault Poignonec (thibault.poignonec@gmail.fr)
 
+// Serialización y deserialización de los mensajes del protocolo Staubli.
+
 
 #include <arpa/inet.h>  // For htonl, htons, etc.
 

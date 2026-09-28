@@ -14,6 +14,8 @@
 //
 // Author: Thibault Poignonec (thibault.poignonec@gmail.fr)
 
+// Implementa la recepción y gestión de mensajes en tiempo real desde el robot.
+
 #include "staubli_robot_driver/real_time_socket_subscriber.hpp"
 
 #include <iostream>

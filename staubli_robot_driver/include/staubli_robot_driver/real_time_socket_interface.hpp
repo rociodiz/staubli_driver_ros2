@@ -14,6 +14,8 @@
 //
 // Author: Thibault Poignonec (thibault.poignonec@gmail.fr)
 
+// Gestiona la comunicación bidireccional en tiempo real con el robot mediante sockets.
+
 #ifndef STAUBLI_ROBOT_DRIVER__REAL_TIME_SOCKET_INTERFACE_HPP_
 #define STAUBLI_ROBOT_DRIVER__REAL_TIME_SOCKET_INTERFACE_HPP_
 

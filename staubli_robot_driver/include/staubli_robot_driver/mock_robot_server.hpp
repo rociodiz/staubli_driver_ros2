@@ -14,6 +14,8 @@
 //
 // Author: Thibault Poignonec (thibault.poignonec@gmail.fr)
 
+// Define un robot simulado para probar la comunicación y el driver sin hardware real.
+
 
 #ifndef STAUBLI_ROBOT_DRIVER__MOCK_ROBOT_SERVER_HPP_
 #define STAUBLI_ROBOT_DRIVER__MOCK_ROBOT_SERVER_HPP_

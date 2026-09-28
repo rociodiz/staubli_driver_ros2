@@ -17,9 +17,8 @@
 # Author: Thibault Poignonec (thibault.poignonec@gmail.fr)
 
 """
-Minimalist helper script to display downloaded Staubli robot logs.
-
-Note, this script requires 'jq' to be installed on your system.
+Script auxiliar para visualizar y filtrar los logs descargados del robot Staubli.
+Convierte los logs a CSV y permite mostrarlos en el terminal, resaltando errores, advertencias y reinicios.
 """
 
 import argparse

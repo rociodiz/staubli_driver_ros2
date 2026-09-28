@@ -14,6 +14,9 @@
 //
 // Author: Thibault Poignonec (thibault.poignonec@gmail.fr)
 
+// Pruebas de la comunicación en tiempo real mediante sockets UDP.
+// Comprueba la recepción de mensajes, detección de paquetes perdidos y comunicación bidireccional.
+
 #include <gtest/gtest.h>
 
 #include <chrono>

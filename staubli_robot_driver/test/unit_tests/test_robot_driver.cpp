@@ -14,6 +14,9 @@
 //
 // Author: Thibault Poignonec (thibault.poignonec@gmail.fr)
 
+// Pruebas unitarias de RobotDriver usando un robot simulado,
+// comprobando la conexión, desconexión y lectura del estado del robot.
+
 #include <gtest/gtest.h>
 #include <memory>
 #include <string>
