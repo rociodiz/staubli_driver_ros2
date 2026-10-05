@@ -138,6 +138,38 @@ _TX2_60L_NAMES, _TX2_60L_ORIGINS, _TX2_60L_AXES, _TOOL0_OFFSET, _JOINT_LIMITS_RA
 # Límites de velocidad articulares (rad/s) leídos de joint_limits.yaml.
 JOINT_VELOCITY_LIMITS_RAD = list(_JOINT_VELOCITY_LIMITS_RAD)
 
+# Margen de seguridad de posición (rad) con el que el URDF construye el
+# <safety_controller> de cada junta:
+#
+#     soft_lower_limit = min_position + safety_position_margin
+#     soft_upper_limit = max_position - safety_position_margin
+#
+# El valor debe coincidir con el arg `safety_position_margin` de
+# staubli_robot_description/urdf/staubli_macro.xacro (y del
+# `staubli.urdf.xacro`), que es quien genera ese bloque. NO es un límite
+# inventado para el solver: es el mismo número que acaba aplicando
+# ros2_control.
+SAFETY_POSITION_MARGIN_RAD = 0.1
+
+# Límites BLANDOS: los que el JointSoftLimiter de ros2_control impone de verdad
+# sobre el comando. Son los límites con los que hay que validar una solución,
+# no los duros.
+#
+# Por qué importa: gz_ros2_control publica el comando de posición hacia
+# Gazebo, pero el SoftJointLimiter de ros2_control recorta ese comando a los
+# límites blandos ANTES de que lo reciba el plugin. Una solución que cae entre
+# el límite blando y el duro es decir "válida" para el solver pero INALCANZABLE
+# para el robot: el comando se recorta y la articulación se queda con un error
+# de posición permanente que el joint_trajectory_controller nunca puede
+# cerrar. Medido en Gazebo con P1 desplazado 20 mm: la IK daba joint_5 =
+# +2.0359 rad (dentro del duro 2.0944, fuera del blando 1.9944), la GUI lo dio
+# por válido, y el goal murió con GOAL_TOLERANCE_VIOLATED con un error
+# residual de 0.0825 rad en joint_5.
+_JOINT_SOFT_LIMITS_RAD = [
+    (lo + SAFETY_POSITION_MARGIN_RAD, hi - SAFETY_POSITION_MARGIN_RAD)
+    for lo, hi in _JOINT_LIMITS_RAD
+]
+
 # Tolerancias de validación del solver.
 _IK_POS_EPS = 1.0e-4   # m
 _IK_ROT_EPS = 1.0e-3   # rad
@@ -294,9 +326,18 @@ class Tx260lKinematics:
 
     # ------------------------------------------------------------------
     def check_joint_limits(self, q: Sequence[float]) -> Tuple[bool, List[bool]]:
-        """True si todas las articulaciones están dentro de sus límites (con margen)."""
+        """True si todas las articulaciones están dentro de los límites BLANDOS.
+
+        Se validan los soft limits (límite duro ∓ SAFETY_POSITION_MARGIN_RAD), no
+        los duros, porque son los que ros2_control aplica de verdad sobre el
+        comando antes de llegar a Gazebo. Validar contra los duros dejaría pasar
+        soluciones que el SoftJointLimiter va a recortar, y el goal se quedaría
+        con un error de posición irreducible.
+
+        La holgura de 1e-6 es solo numérica: no se usa como margen de diseño.
+        """
         per: List[bool] = []
-        for qj, (lo, hi) in zip(q, _JOINT_LIMITS_RAD):
+        for qj, (lo, hi) in zip(q, _JOINT_SOFT_LIMITS_RAD):
             per.append(lo - 1.0e-6 <= float(qj) <= hi + 1.0e-6)
         return all(per), per
 

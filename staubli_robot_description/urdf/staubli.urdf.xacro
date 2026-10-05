@@ -115,6 +115,12 @@
                 name="gz_ros2_control::GazeboSimROS2ControlPlugin">
                 <parameters>$(arg gazebo_controllers_file)</parameters>
                 <position_proportional_gain>1.0</position_proportional_gain>
+                <!-- Limite de aceleracion (rad/s^2) con el que la interfaz de
+                     posicion limita la velocidad de referencia generada, para
+                     que la articulacion se aproxime al objetivo sin pasarse.
+                     1000 deg/s^2, el valor declarado en joint_limits.yaml para
+                     las articulaciones 1-5. 0 desactiva la limitacion. -->
+                <position_max_acceleration>17.453292519943295</position_max_acceleration>
             </plugin>
         </gazebo>
     </xacro:if>

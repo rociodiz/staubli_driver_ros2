@@ -58,16 +58,36 @@ class TrajectoryPlan:
 class TrajectoryBuilder:
     """Convierte PointsConfig en una JointTrajectory para el controller."""
 
-    def __init__(self, config: PointsConfig, kinematics: Optional[Tx260lKinematics] = None):
+    def __init__(
+        self,
+        config: Optional[PointsConfig] = None,
+        kinematics: Optional[Tx260lKinematics] = None,
+    ):
+        """`config` es opcional: quien ya trae la IK hecha puede usar
+        `build_from_joint_waypoints()` sin pasar por `config/points.yaml`.
+
+        Con `config=None` solo están disponibles las entradas que no leen la
+        configuración; `build()` fallará con un mensaje claro.
+        """
         self._config = config
-        self._kinematics = kinematics or Tx260lKinematics(
-            random_seed=config.random_seed,
-            n_random_seeds=config.n_random_seeds,
-        )
+        if kinematics is not None:
+            self._kinematics = kinematics
+        elif config is not None:
+            self._kinematics = Tx260lKinematics(
+                random_seed=config.random_seed,
+                n_random_seeds=config.n_random_seeds,
+            )
+        else:
+            self._kinematics = Tx260lKinematics()
 
     # ------------------------------------------------------------------
     def build(self) -> TrajectoryPlan:
         """Construye el plan: registros de diagnóstico + JointTrajectory."""
+        if self._config is None:
+            raise ValueError(
+                "build() necesita un PointsConfig; para waypoints ya "
+                "resueltos usa build_from_joint_waypoints()."
+            )
         if self._config.point_type == "joint":
             return self._build_joint_mode()
 
@@ -184,6 +204,116 @@ class TrajectoryBuilder:
             msg_point.positions = [float(v) for v in record.q]
             msg_point.time_from_start = Duration(
                 seconds=float(point["time_from_start"])
+            ).to_msg()
+            trajectory.points.append(msg_point)
+        return trajectory
+
+    # ------------------------------------------------------------------
+    def build_from_joint_waypoints(
+        self,
+        waypoints: Sequence[Dict[str, Any]],
+        joint_names: Optional[Sequence[str]] = None,
+    ) -> TrajectoryPlan:
+        """TrajectoryPlan desde waypoints articulares YA resueltos (sin IK).
+
+        Camino de entrada para quien ya tiene la IK hecha y no quiere que se
+        vuelva a calcular: por ejemplo el barrido, donde `scan_path` resuelve
+        P1/P2/P3 con el eje óptico real de la cámara y encadena la solución.
+        Reutilizar ese `q` tal cual es lo que preserva la orientación de
+        barrido; pasar los puntos por `build()` los reorientaría con
+        `look_at_part_center` (que apunta el +Z de tool0, no el +X de la
+        cámara) y podría elegir otra rama articular.
+
+        No se usa `self._config`: los límites sí se verifican, con la misma
+        cinemática, pero los puntos no salen del YAML. Si no se pasan
+        `joint_names` explícitos, se toman de la configuración si la hay.
+
+        Cada waypoint es un dict con:
+          - `q`:                6 valores en radianes (obligatorio)
+          - `time_from_start`:  segundos, absoluto y creciente (obligatorio)
+          - `name`:             etiqueta para diagnóstico (opcional)
+          - `velocities`:       6 valores; si se da, el controlador podrá usar
+                                spline cúbico en vez de interpolación lineal
+                                (no se usa en la v1 del barrido)
+
+        El `JointTrajectory` resultante lleva `trajectory.frame_id` vacío, como
+        el que ya genera `_to_joint_trajectory`.
+        """
+        if not waypoints:
+            raise ValueError("se necesita al menos un waypoint")
+
+        names = (
+            list(joint_names)
+            if joint_names
+            else list(self._config.joint_names if self._config else [])
+        )
+        if not names:
+            raise ValueError(
+                "hace falta joint_names explícito: no hay PointsConfig de "
+                "donde sacarlos"
+            )
+        n_joints = len(names)
+
+        records: List[WaypointRecord] = []
+        previous_time: Optional[float] = None
+
+        for index, waypoint in enumerate(waypoints):
+            q = [float(v) for v in waypoint["q"]]
+            if len(q) != n_joints:
+                raise ValueError(
+                    f"waypoint {index} ({waypoint.get('name', '?')}): {len(q)} "
+                    f"articulaciones, se esperaban {n_joints}"
+                )
+            inside, per_joint = self._kinematics.check_joint_limits(q)
+
+            time = float(waypoint["time_from_start"])
+            if previous_time is not None and time <= previous_time:
+                raise ValueError(
+                    f"waypoint {index} ({waypoint.get('name', '?')}): "
+                    f"time_from_start={time} no es mayor que el anterior "
+                    f"({previous_time}); los tiempos deben ser crecientes"
+                )
+            previous_time = time
+
+            records.append(
+                WaypointRecord(
+                    name=str(waypoint.get("name", f"waypoint_{index + 1}")),
+                    q=q,
+                    joint_ok=per_joint,
+                    inside_limits=inside,
+                    solved=True,
+                    info=waypoint.get("info", "q precomputed (sin IK)"),
+                )
+            )
+
+        plan = TrajectoryPlan(records=records)
+        plan.all_solved = True
+        plan.all_inside_limits = all(r.inside_limits for r in records)
+        if plan.all_inside_limits:
+            plan.trajectory = self._joint_trajectory_from_waypoints(waypoints, names)
+        return plan
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _joint_trajectory_from_waypoints(
+        waypoints: Sequence[Dict[str, Any]], joint_names: Sequence[str]
+    ) -> JointTrajectory:
+        """Construye el JointTrajectory desde los dicts de waypoint.
+
+        Gemelo de `_to_joint_trajectory()` pero sin `PointsConfig`: por eso no
+        lleva velocidades (el JTC interpola linealmente) y por eso los
+        tiempos salen del propio waypoint.
+        """
+        trajectory = JointTrajectory()
+        trajectory.joint_names = list(joint_names)
+        trajectory.points = []
+        for waypoint in waypoints:
+            msg_point = JointTrajectoryPoint()
+            msg_point.positions = [float(v) for v in waypoint["q"]]
+            if waypoint.get("velocities"):
+                msg_point.velocities = [float(v) for v in waypoint["velocities"]]
+            msg_point.time_from_start = Duration(
+                seconds=float(waypoint["time_from_start"])
             ).to_msg()
             trajectory.points.append(msg_point)
         return trajectory
