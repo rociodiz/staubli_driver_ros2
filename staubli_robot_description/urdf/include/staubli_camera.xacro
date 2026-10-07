@@ -2,20 +2,12 @@
 <!-- |                         Staubli eye-in-hand RGB camera                     | -->
 <!-- |                                                                           | -->
 <!-- | Eye-in-hand camera mounted on link_6 of the TX2-60L (same Z as tool0).    | -->
+<!-- | Integrated with real support + sensor STL (SENSOR_BASE.stl).              | -->
 <!-- |                                                                           | -->
-<!-- | Orientation: in Gazebo Sim the camera optical axis is the local -Z axis.  | -->
-<!-- | At home the wrist (link_6) is world aligned, so a plain +X roll keeps the | -->
-<!-- | -Z pointing down into the robot. The fixed joint rpy (0.7031 0 0) instead | -->
-<!-- | rolls the camera so its -Z aims outward and slightly down, framing the    | -->
-<!-- | inspection table / workpiece (part_1) seen from the roof. Only the look   | -->
-<!-- | direction changes; the mount pose and tool0 are untouched.                | -->
-<!-- |                                                                           | -->
-<!-- | The camera link / fixed joint make camera_link part of the robot TF tree. | -->
-<!-- | The gazebo block (reference camera_link) embeds a Gazebo Sim camera       | -->
-<!-- | sensor: when gz-sim spawns the robot from the URDF, it is converted into  | -->
-<!-- | an SDF camera sensor on link camera_link of the model. The sensor         | -->
-<!-- | publishes the image on the Gazebo topic /camera/image_raw, which the      | -->
-<!-- | launch_gazebo.launch.py bridges to the ROS topic /camera/image_raw.       | -->
+<!-- | The STL contains the complete physical support + sensor. The virtual      | -->
+<!-- | camera geometry is removed to avoid duplication. camera_link is a frame   | -->
+<!-- | (no visual) with the sensor placed on the inclined face of the support.  | -->
+<!-- | Orientation estimation is pending validation (see comments).             | -->
 <!-- =========================================================================== -->
 
 <robot xmlns:xacro="http://wiki.ros.org/xacro">
@@ -23,80 +15,65 @@
     <xacro:macro name="staubli_camera" params="
         robot_prefix:=''
         parent_link
-        xyz:='0 0 0.07'
-        rpy:='2.9391 -1.3969 -2.9714'
         update_rate:=30
         width:=640
         height:=480
         hfov:=1.0472
-        laser_distance:='0.50'
-        laser_width:='0.30'
-        laser_line_width:='0.008'
     ">
-        <!-- Camera mount link (eye-in-hand) -->
-
-        <link name="${robot_prefix}camera_link">
+        <!-- Support + sensor physical geometry (STL) -->
+        <link name="${robot_prefix}sensor_support_link">
             <inertial>
-                <mass value="0.05"/>
+                <mass value="0.5"/>
                 <inertia
-                    ixx="1.0e-5" ixy="0.0" ixz="0.0"
-                    iyy="1.0e-5" iyz="0.0" izz="1.0e-5"/>
+                    ixx="0.001846" ixy="0.0" ixz="0.0"
+                    iyy="0.000599" iyz="0.0" izz="0.002171"/>
             </inertial>
-            <visual name="camera_visual">
-                <geometry>
-                    <box size="0.04 0.04 0.04"/>
-                </geometry>
-                <material name="camera_material">
-                    <color rgba="0.15 0.15 0.15 1"/>
-                </material>
-            </visual>
-            <visual name="camera_housing_visual">
-                <geometry>
-                    <box size="0.06 0.05 0.045"/>
-                </geometry>
-                <material name="camera_housing_material">
-                    <color rgba="0.08 0.10 0.12 1"/>
-                </material>
-            </visual>
-            <visual name="camera_lens_visual">
-                <origin xyz="0.032 0 0" rpy="0 1.57079632679 0"/>
-                <geometry>
-                    <cylinder radius="0.016" length="0.008"/>
-                </geometry>
-                <material name="camera_lens_material">
-                    <color rgba="0.02 0.04 0.08 1"/>
-                </material>
-            </visual>
-            <visual name="laser_triangle_visual">
-                <origin xyz="0 0 0" rpy="0 0 0"/>
+            <visual name="sensor_support_visual">
                 <geometry>
                     <mesh
-                        filename="package://staubli_robot_description/meshes/laser_triangle.obj"
-                        scale="${laser_distance} ${laser_width} 1.0"/>
+                        filename="package://staubli_robot_description/meshes/SENSOR_BASE.stl"
+                        scale="0.001 0.001 0.001"/>
                 </geometry>
-                <material name="laser_triangle_material">
-                    <color rgba="0.10 0.70 1.0 0.25"/>
-                </material>
             </visual>
-            <visual name="laser_line_visual">
-                <origin xyz="${laser_distance} 0 0" rpy="0 0 0"/>
+            <collision name="sensor_support_collision">
                 <geometry>
-                    <box size="${laser_line_width} ${laser_width} ${laser_line_width}"/>
+                    <mesh
+                        filename="package://staubli_robot_description/meshes/SENSOR_BASE.stl"
+                        scale="0.001 0.001 0.001"/>
                 </geometry>
-                <material name="laser_line_material">
-                    <color rgba="1.0 0.0 0.0 0.95"/>
-                </material>
-            </visual>
+            </collision>
         </link>
 
-        <joint name="${robot_prefix}camera_fixed_joint" type="fixed">
+        <!-- Joint: tool0 -> sensor_support_link -->
+        <!-- TODO: validation pending - transformation from tool0 to support may need fine adjustment -->
+        <joint name="${robot_prefix}sensor_support_joint" type="fixed">
             <parent link="${parent_link}"/>
+            <child link="${robot_prefix}sensor_support_link"/>
+            <origin xyz="0.016130 0.003110 0.168690" rpy="0 -1.570796 0"/>
+        </joint>
+
+        <!-- Camera frame (no geometry) - reference for real sensor -->
+        <!-- TODO: ESTIMATION PENDING VALIDATION
+             Position/orientation obtained from geometric analysis of STL (surface inclined).
+             Origin at center of inclined face. -Z_local(camera_link) aligned with estimated
+             observation direction (+n_patch). May require adjustment after Gazebo verification. -->
+        <link name="${robot_prefix}camera_link">
+            <inertial>
+                <mass value="0.5"/>
+                <inertia
+                    ixx="1.0e-6" ixy="0.0" ixz="0.0"
+                    iyy="1.0e-6" iyz="0.0" izz="1.0e-6"/>
+            </inertial>
+        </link>
+
+        <!-- Joint: sensor_support_link -> camera_link -->
+        <joint name="${robot_prefix}camera_fixed_joint" type="fixed">
+            <parent link="${robot_prefix}sensor_support_link"/>
             <child link="${robot_prefix}camera_link"/>
-            <origin xyz="${xyz}" rpy="${rpy}"/>
+            <origin xyz="0.011764 0.129833 0.118716" rpy="0.785429 -0.775796 -3.141193"/>
         </joint>
 
         <!-- Gazebo Sim RGB camera sensor (simple configuration, no depth). -->
-
         <gazebo reference="${robot_prefix}camera_link">
             <sensor name="camera" type="camera">
                 <topic>/camera/image_raw</topic>
