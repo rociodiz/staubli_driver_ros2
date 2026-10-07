@@ -28,12 +28,56 @@
                     ixx="0.001846" ixy="0.0" ixz="0.0"
                     iyy="0.000599" iyz="0.0" izz="0.002171"/>
             </inertial>
-            <visual name="sensor_support_visual">
+            <!-- Visual 1: metallic structure of the support (components >= 30 mm) -->
+            <visual name="sensor_support_visual_structure">
                 <geometry>
                     <mesh
-                        filename="package://staubli_robot_description/meshes/SENSOR_BASE.stl"
+                        filename="package://staubli_robot_description/meshes/SENSOR_BASE_structure.stl"
                         scale="0.001 0.001 0.001"/>
                 </geometry>
+                <material name="sensor_support_structure_material">
+                    <color rgba="0.35 0.37 0.39 1.0"/>
+                </material>
+            </visual>
+            <!-- Visual 2: dark sensor housing + small hardware (components < 30 mm) -->
+            <visual name="sensor_support_visual_dark">
+                <geometry>
+                    <mesh
+                        filename="package://staubli_robot_description/meshes/SENSOR_BASE_dark.stl"
+                        scale="0.001 0.001 0.001"/>
+                </geometry>
+                <material name="sensor_support_dark_material">
+                    <color rgba="0.12 0.13 0.14 1.0"/>
+                </material>
+            </visual>
+
+            <!-- Visual 3: FOV plane of the sensor (fan extracted from SENSOR_BASE.stl,
+                 1108 triangles, identical geometry and pose: x -70.187..464.813,
+                 y -19.829..-19.819, z -411.451..440.826 mm) -->
+            <visual name="sensor_support_visual_plane">
+                <geometry>
+                    <mesh
+                        filename="package://staubli_robot_description/meshes/SENSOR_BASE_plane.stl"
+                        scale="0.001 0.001 0.001"/>
+                </geometry>
+                <material name="sensor_support_plane_material">
+                    <color rgba="1.0 1.0 1.0 0.25"/>
+                </material>
+            </visual>
+
+            <!-- Visual 4: red line on the far edge of the FOV plane.
+                 Same logic as the old laser_line_visual (thin box, laser_line_width
+                 thick) laid along the final edge of the plane:
+                 x = 464.813 mm, y = -19.825 mm, z -411.451..440.826 mm -->
+            <xacro:property name="laser_line_width" value="0.008"/>
+            <visual name="sensor_support_visual_line">
+                <origin xyz="0.464813 -0.019825 0.0146875" rpy="0 0 0"/>
+                <geometry>
+                    <box size="${laser_line_width} ${laser_line_width} 0.852277"/>
+                </geometry>
+                <material name="sensor_support_line_material">
+                    <color rgba="1.0 0.0 0.0 1.0"/>
+                </material>
             </visual>
             <collision name="sensor_support_collision">
                 <geometry>
@@ -49,7 +93,7 @@
         <joint name="${robot_prefix}sensor_support_joint" type="fixed">
             <parent link="${parent_link}"/>
             <child link="${robot_prefix}sensor_support_link"/>
-            <origin xyz="0.016130 0.003110 0.168690" rpy="0 -1.570796 0"/>
+            <origin xyz="-0.003110 0.016130 0.168690" rpy="0 -1.570796 1.570796"/>
         </joint>
 
         <!-- Camera frame (no geometry) - reference for real sensor -->

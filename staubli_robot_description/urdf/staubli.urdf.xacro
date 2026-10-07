@@ -78,13 +78,10 @@
         <origin xyz="0 0 0" rpy="0 0 0"/>
     </xacro:staubli_robot>
 
-    <!-- Eye-in-hand RGB camera on link_6 (same Z as tool0). -->
+    <!-- Eye-in-hand RGB camera/sensor with real support STL attached to tool0. -->
     <xacro:staubli_camera
         robot_prefix="$(arg robot_prefix)"
-        parent_link="$(arg robot_prefix)link_6"
-        laser_distance="$(arg laser_distance)"
-        laser_width="$(arg laser_width)"
-        laser_line_width="$(arg laser_line_width)"
+        parent_link="$(arg robot_prefix)tool0"
     />
 
     <!-- ROS2 control description -->
