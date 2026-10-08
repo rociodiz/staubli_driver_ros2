@@ -51,7 +51,7 @@
                 </material>
             </visual>
 
-            <!-- Visual 3: FOV plane of the sensor (fan extracted from SENSOR_BASE.stl,
+            <!-- Visual 3: FOV plane of the sensor (fan extracted from SENSOR_BASE_plane.stl,
                  1108 triangles, identical geometry and pose: x -70.187..464.813,
                  y -19.829..-19.819, z -411.451..440.826 mm) -->
             <visual name="sensor_support_visual_plane">
@@ -82,7 +82,7 @@
             <collision name="sensor_support_collision">
                 <geometry>
                     <mesh
-                        filename="package://staubli_robot_description/meshes/SENSOR_BASE.stl"
+                        filename="package://staubli_robot_description/meshes/SENSOR_BASE_collision.stl"
                         scale="0.001 0.001 0.001"/>
                 </geometry>
             </collision>
