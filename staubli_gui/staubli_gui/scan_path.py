@@ -20,27 +20,33 @@ disco y dos ejecuciones del mismo perfil dan exactamente el mismo barrido.
 
 Convención de orientación
 -------------------------
-La cámara es eye-in-hand (`staubli_camera.xacro`) y su eje óptico real es el
-**+X de camera_link**, no el -Z que afirma el comentario de ese xacro: en
-Gazebo las cámaras miran por +X. Los tres puntos se orientan de modo que ese
-+X apunte a la superficie, compensando el rpy de montaje con
+El sensor es eye-in-hand (`staubli_camera.xacro`), pero el FOV que define la
+geometría de barrido es el cono visual de `sensor_support_link`: el triángulo
+translúcido y la línea roja cuelgan de ESE link, no de `camera_link` (`camera_link`
+lleva su propio rpy de montaje y su +X está ~19° fuera del boresight del FOV).
+El boresight del FOV es el +X del soporte, que coincide con el **+Z de tool0**
+(`sensor_support_joint` rpy `0 -π/2 π/2`); el soporte Y es la normal del plano
+del FOV y el soporte Z la dirección de la línea roja.
 
-    R_tool0 = R_camera · R_montaje⁻¹
+Por eso los puntos se orientan de modo que ese +Z de tool0 (boresight del FOV)
+apunte a la superficie, compensando el montaje con
 
-`tool0` y `camera_link` están ambos fijos a `link_6` en `xyz="0 0 0.07"`, pero
-sólo la cámara lleva rpy, así que la rotación de tool0 respecto a link_6 es la
-identidad y `R_base_tool0 = R_base_cam · R_montaje⁻¹` directamente.
+    R_tool0 = R_FOV · R_montaje⁻¹
 
-Consecuencia medida de esta convención: la cámara mira perpendicular a la cara
-mientras el brazo extiende el sensor casi radialmente, así que la muñeca
-(`joint_5`, ±120°) queda muy exigida en algunas orientaciones. Con el cubo de
-la escena de inspección y línea de 8 cm, midiendo `scan_distance` desde el
-plano de apoyo: +Z llega hasta d≈0.50 m (la cota de trabajo, la distancia a la
-mesa), +X y -Y hasta 0.35 m, -X hasta 0.25 m y a partir de 0.30 m se sale de
-`joint_5`; -Z se pasa de las articulaciones 2/3/5 y +Y no resuelve a ninguna
-distancia. `resolve()` lo reporta en `ScanPoint.offending_joints` y
-`ScanPoint.solved` en vez de ocultarlo, para que quien use esto distinga "fuera
-de límites" de "no converge".
+`tool0` está fijo a `link_6` en `xyz="0 0 0.07"` sin rpy, así que
+`R_base_tool0 = R_base_FOV · R_montaje⁻¹` directamente. El valor de
+`R_montaje` se elige además para que la línea roja del FOV quede perpendicular
+al avance del barrido.
+
+Consecuencia medida de esta convención: apuntando el +Z de tool0 a la cara, el
+plano del FOV queda perfectamente perpendicular a la superficie y la muñeca
+(`joint_5`) deja de ser el eslabón crítico de la cara superior: +Z (la cota de
+trabajo, 0.50 m desde la mesa) se alcanza holgada y aguanta hasta ~0.65 m. En
+cambio caras en las que el sensor debe apuntar hacia el robot con la pieza de
+por medio (-Y, con la parte ya acercada a 0.20 m del robot) dejan de resolver.
+`resolve()` lo reporta en `ScanPoint.offending_joints` y `ScanPoint.solved` en
+vez de ocultarlo, para que quien use esto distinga "fuera de límites" de "no
+converge".
 
 Nota sobre determinismo: `Tx260lKinematics` es multi-start y sortea sus
 semillas de un `random.Random` cuyo estado avanza en cada llamada, así que
@@ -76,20 +82,32 @@ import yaml
 
 from .user_points import default_config_dir
 
-# ─── Montaje de la cámara (espejo de staubli_camera.xacro) ───────────────
+# ─── Montaje del sensor/FOV (espejo de staubli_camera.xacro) ──────────────
 #
 # NO se lee el xacro en runtime: son valores fijos de la descripción del
-# robot, y releer un URDF por cada barrido.enums I/O innecesario. Se
-# replican aquí para que la geometría sea testeable sin lanzar Gazebo.
+# robot, y releer un URDF por cada barrido es I/O innecesario. Se replican
+# aquí para que la geometría sea testeable sin lanzar Gazebo.
 #
-# OJO con las unidades: <origin rpy="..."> del URDF se expresa en RADIANES,
-# así que estos números se pasan a `kdl.Rotation.RPY` tal cual, sin
-# convertir. Convertirlos desde grados (como se hacía antes) modelaba un
-# montaje de 8.76° en lugar del real de 199.64°, y desviaba el eje óptico
-# 163.36°: la cámara apuntaba a la pared en vez de a la cara +Z.
-# El sufijo _DEG del nombre es histórico y engañoso; los valores son radianes.
+# El cono FOV (triángulo translúcido + línea roja) cuelga de
+# `sensor_support_link`, no de `camera_link`. Su boresight es el +X del
+# soporte, que en tool0 coincide con el +Z (`sensor_support_joint` rpy
+# `0 -π/2 π/2`). Ejes del soporte en tool0:
+#
+#     +X (boresight del FOV) → +Z de tool0
+#     +Z (dirección de la línea roja) → -Y de tool0
+#
+# La orientación desea el boresight apuntando a la superficie y la línea roja
+# perpendicular al avance. Se materializa con un único rpy de montaje virtual
+# RPY(0, -π/2, 0) = Ry(-π/2):
+#   1) lleva el +X de la frame de apuntado a +Z de tool0 (el boresight mira a
+#      la cara);
+#   2) deja el +Z de la frame (la "línea") en -X de tool0, perpendicular al
+#      eje de avance [0,-1,0] de la celda.
+#
+# Todo ello en RADIANES (como <origin rpy> del URDF); el sufijo _DEG del
+# nombre es histórico y engañoso.
 
-CAMERA_MOUNT_RPY_DEG: Tuple[float, float, float] = (2.9391, -1.3969, -2.9714)
+CAMERA_MOUNT_RPY_DEG: Tuple[float, float, float] = (0.0, -math.pi / 2.0, 0.0)
 TOOL0_MOUNT_RPY_DEG: Tuple[float, float, float] = (0.0, 0.0, 0.0)
 
 # ─── Superficie: las seis caras del cubo ─────────────────────────────────
@@ -119,8 +137,10 @@ ROLES: Tuple[str, str] = ("P1", "P2")
 
 # Parte por defecto de la celda de inspección, en base_link. Es el valor que
 # se usa si `scan_paths.yaml` no declara `part`, para que la GUI arranque con
-# la geometría validada en lugar de un cubo en el origen.
-DEFAULT_PART_CENTER: List[float] = [0.0, 0.66, 0.24]
+# la geometría validada en lugar de un cubo en el origen. La pieza mundial está
+# en (0.0, 0.46, 0.54) y base_link se desplaza (0, 0, 0.30) respecto al mundo
+# (spawn de Gazebo), así que el centro en base_link es (0.0, 0.46, 0.24).
+DEFAULT_PART_CENTER: List[float] = [0.0, 0.46, 0.24]
 DEFAULT_PART_SIZE: List[float] = [0.08, 0.08, 0.08]
 
 _EPS = 1.0e-9
@@ -190,19 +210,20 @@ def _rpy_degrees(rotation: kdl.Rotation) -> List[float]:
 def frame_looking_with_optical_axis(
     position: Sequence[float], pointing: Sequence[float]
 ) -> kdl.Frame:
-    """Frame de tool0 tal que el **+X de camera_link** apunta a `pointing`.
+    """Frame de tool0 tal que el **boresight del FOV** (el +X de
+    `sensor_support_link`, que en tool0 coincide con +Z) apunta a `pointing`.
 
-    Se construye el frame de la cámara con X = dirección de apuntado y un
-   Referente estable para el resto (mismo criterio que
-    `Tx260lKinematics.orientation_frame_looking_at`, pero sobre el eje óptico
-    real en lugar del +Z de tool0), y luego se deshace el rpy de montaje:
+    Se construye el frame del FOV con X = dirección de apuntado y un
+    referente estable para el resto (mismo criterio que
+    `Tx260lKinematics.orientation_frame_looking_at`, pero sobre el boresight
+    del FOV), y luego se deshace el rpy de montaje:
 
-        R_tool0 = R_camera · R_montaje⁻¹
+        R_tool0 = R_FOV · R_montaje⁻¹
 
     El giro alrededor del eje de apuntado queda fijado de forma determinista:
-    el "arriba" de la cámara se alinea con +Z del mundo salvo que el apuntado
-    sea casi vertical, en cuyo caso se usa +X como referente para que los
-    ejes no se degeneren.
+    el "arriba" se alinea con +Z del mundo salvo que el apuntado sea casi
+    vertical, en cuyo caso se usa +X como referente para que los ejes no se
+    degeneren.
     """
     x = _unit(pointing)
     aux = [1.0, 0.0, 0.0] if abs(x[2]) > 0.99 else [0.0, 0.0, 1.0]
@@ -215,7 +236,8 @@ def frame_looking_with_optical_axis(
 
 
 def camera_optical_axis(rotation: kdl.Rotation) -> List[float]:
-    """Dirección a la que apunta el +X de camera_link, en base_link.
+    """Dirección a la que apunta el boresight del FOV (+X de
+    `sensor_support_link`, que en tool0 es +Z), en base_link.
 
     A partir de la rotación de tool0 recompone el rpy de montaje. Es la
     comprobación directa de que la orientación derivada apunta a la cara.

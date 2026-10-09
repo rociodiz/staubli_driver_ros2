@@ -39,9 +39,10 @@ planning_frame: base_link
 # ----------------------------------------------------------------------------
 orientation_mode: look_at_part_center
 
-# Centro de la pieza en base_link: world (0.0, 0.66, 0.54) menos el offset
-# world->base_link (0, 0, 0.30) del spawn de Gazebo => (0.0, 0.66, 0.24).
-part_center_base_link: [0.0, 0.66, 0.24]
+# Centro de la pieza en base_link: world (0.0, 0.46, 0.54) menos el offset
+# world->base_link (0, 0, 0.30) del spawn de Gazebo => (0.0, 0.46, 0.24).
+# (La mesa y la pieza se acercaron 0.20 m al robot.)
+part_center_base_link: [0.0, 0.46, 0.24]
 
 # ----------------------------------------------------------------------------
 # PUNTOS DE LA PRUEBA (3 ejemplos alrededor de la pieza, ajustables).

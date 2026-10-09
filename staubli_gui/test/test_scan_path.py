@@ -35,16 +35,17 @@ from staubli_trajectory.tx2_60l_ik import (
 
 # ── Configuración de referencia ──────────────────────────────────────────
 
-CENTRO = [0.0, 0.66, 0.24]
+CENTRO = [0.0, 0.46, 0.24]
 LADO = 0.08
 SCAN_DISTANCE = 0.50
 LINE_LENGTH = 0.08
 
-# Geometría real de la celda de inspección, en base_link: la mesa está a z=0.20
-# y la cámara barre la cara superior a 0.50 m de ella, de +Y a -Y.
+# Geometría real de la celda de inspección, en base_link: la mesa está a z=0.20,
+# la pieza (world y=0.46) a 0.20 m del robot, y la cámara barre la cara superior
+# a 0.50 m de la mesa, de +Y a -Y.
 TABLE_Z = 0.20
-P1_ESPERADO = [0.0, 0.70, 0.70]
-P2_ESPERADO = [0.0, 0.62, 0.70]
+P1_ESPERADO = [0.0, 0.50, 0.70]
+P2_ESPERADO = [0.0, 0.42, 0.70]
 
 # Tangente por cara: la línea de barrido nunca puede ser paralela a la normal.
 LINE_AXIS = {
@@ -165,8 +166,8 @@ def test_la_solucion_no_tiene_P3(part, kin):
 def test_el_barrido_va_de_mas_Y_a_menos_Y(part, kin):
     solution = resolve_scan(_profile(part), _spec(), kin)
     p1, p2 = solution.point("P1"), solution.point("P2")
-    assert p1.position_xyz[1] == pytest.approx(0.70, abs=1e-9)
-    assert p2.position_xyz[1] == pytest.approx(0.62, abs=1e-9)
+    assert p1.position_xyz[1] == pytest.approx(0.50, abs=1e-9)
+    assert p2.position_xyz[1] == pytest.approx(0.42, abs=1e-9)
     assert p1.position_xyz[1] > p2.position_xyz[1]
 
 
@@ -206,8 +207,8 @@ def test_sin_margenes_los_extremos_caen_en_la_pieza(part, kin):
     """Con ambos márgenes a 0 se conserva el comportamiento anterior."""
     solution = resolve_scan(_profile(part), _spec(), kin)
     p1, p2 = solution.point("P1"), solution.point("P2")
-    assert p1.position_xyz[1] == pytest.approx(0.70, abs=1e-9)
-    assert p2.position_xyz[1] == pytest.approx(0.62, abs=1e-9)
+    assert p1.position_xyz[1] == pytest.approx(0.50, abs=1e-9)
+    assert p2.position_xyz[1] == pytest.approx(0.42, abs=1e-9)
 
 
 def test_el_margen_start_saca_P1_antes_de_entrar_en_la_pieza(part, kin):
@@ -216,8 +217,8 @@ def test_el_margen_start_saca_P1_antes_de_entrar_en_la_pieza(part, kin):
         _profile(part), _spec(scan_margin_start=0.03), kin
     )
     p1 = solution.point("P1")
-    assert p1.position_xyz[1] == pytest.approx(0.70 + 0.03, abs=1e-9)
-    assert p1.position_xyz[1] > 0.70
+    assert p1.position_xyz[1] == pytest.approx(0.50 + 0.03, abs=1e-9)
+    assert p1.position_xyz[1] > 0.50
 
 
 def test_el_margen_end_saca_P2_despues_de_salir_de_la_pieza(part, kin):
@@ -226,8 +227,8 @@ def test_el_margen_end_saca_P2_despues_de_salir_de_la_pieza(part, kin):
         _profile(part), _spec(scan_margin_end=0.03), kin
     )
     p2 = solution.point("P2")
-    assert p2.position_xyz[1] == pytest.approx(0.62 - 0.03, abs=1e-9)
-    assert p2.position_xyz[1] < 0.62
+    assert p2.position_xyz[1] == pytest.approx(0.42 - 0.03, abs=1e-9)
+    assert p2.position_xyz[1] < 0.42
 
 
 def test_los_margenes_son_independientes(part, kin):
@@ -238,8 +239,8 @@ def test_los_margenes_son_independientes(part, kin):
         kin,
     )
     p1, p2 = solution.point("P1"), solution.point("P2")
-    assert p1.position_xyz[1] == pytest.approx(0.73, abs=1e-9)
-    assert p2.position_xyz[1] == pytest.approx(0.615, abs=1e-9)
+    assert p1.position_xyz[1] == pytest.approx(0.53, abs=1e-9)
+    assert p2.position_xyz[1] == pytest.approx(0.415, abs=1e-9)
     # El recorrido total es la suma de lo que aporta cada lado.
     assert solution.scan_length == pytest.approx(
         LINE_LENGTH + 0.03 + 0.005, abs=1e-9
@@ -341,23 +342,37 @@ def test_eje_optico_apunta_a_la_superficie_en_las_seis_caras(face):
     assert camera_optical_axis(frame.M) == pytest.approx([-c for c in normal], abs=1e-9)
 
 
-def test_el_eje_optico_apunta_a_la_cara_y_no_al_eje_z_de_tool0(part, kin):
-    """Distingue la convención nueva de `look_at_part_center` (+Z de tool0)."""
+def test_el_boresight_del_fov_es_el_eje_z_de_tool0_y_el_plano_queda_perpendicular(part, kin):
+    """La convención usa el +Z de tool0, boresight del FOV de sensor_support_link.
+
+    Es el arreglo del plano FOV: apuntando el +X del soporte (= +Z de tool0) a
+    la cara, el plano del FOV (cuya normal es el +Y del soporte) queda
+    PERPENDICULAR a la superficie y la línea roja (+Z del soporte) perpendicular
+    al avance del barrido.
+    """
     import PyKDL as kdl
 
     point = resolve_scan(_profile(part), _spec(), kin).point("P1")
+    assert point.solved
 
     assert point.optical_axis == pytest.approx([0.0, 0.0, -1.0], abs=1e-9)
 
-    # +Z de tool0 es OTRO eje: casi horizontal, no vertical hacia abajo.
     frame = kdl.Frame(
         kdl.Rotation.RPY(*[math.radians(v) for v in point.rpy_degrees]),
         kdl.Vector(*point.position_xyz),
     )
     z_tool0 = [c for c in (frame.M * kdl.Vector(0.0, 0.0, 1.0))]
-    coseno = sum(z_tool0[i] * point.optical_axis[i] for i in range(3))
-    assert z_tool0 != pytest.approx(point.optical_axis, abs=1e-3)
-    assert abs(coseno) < 0.99
+    assert z_tool0 == pytest.approx(point.optical_axis, abs=1e-6)
+
+    # Normal del plano FOV = +Y del soporte: debe quedar horizontal (perpendicular
+    # a la cara superior, cuya normal es +Z del mundo).
+    r_support = kdl.Rotation.RPY(0.0, -math.pi / 2.0, math.pi / 2.0)
+    normal_fov = frame.M * r_support * kdl.Vector(0.0, 1.0, 0.0)
+    assert abs(normal_fov[2]) < 1e-6
+
+    # Línea roja = +Z del soporte: perpendicular al eje de avance [0,-1,0].
+    linea = frame.M * r_support * kdl.Vector(0.0, 0.0, 1.0)
+    assert abs(linea[1]) < 1e-6
 
 
 @pytest.mark.parametrize("face", sorted(FACE_NORMALS))
@@ -506,10 +521,10 @@ def test_line_axis_paralelo_a_la_normal_se_rechaza(part):
 
 @pytest.mark.parametrize(
     ("face", "distancia"),
-    [("-X", 0.30), ("-X", 0.35), ("-X", 0.40)],
+    [("-X", 0.35), ("-X", 0.40)],
 )
 def test_se_detecta_joint_5_fuera_de_limites(face, distancia, part, kin):
-    """En -X la muñeca se pasa: el barrido no es válido por joint_5."""
+    """En -X la muñeca se pasa a partir de 0.35 m: el barrido no es válido."""
     solution = resolve_scan(_profile(part, scan_distance=distancia), _spec(face), kin)
 
     assert solution.valid is False
@@ -524,16 +539,19 @@ def test_se_detecta_joint_5_fuera_de_limites(face, distancia, part, kin):
             assert point.offending_joint_names() == ["joint_5"]
             _, degrees_inside = kin.check_joint_limits(point.q)
             assert degrees_inside[4] is False
-            assert abs(math.degrees(point.q[4])) > 120.0
+            # Fuera del límite BLANDO de joint_5 (el que decide check_joint_limits).
+            assert abs(point.q[4]) > _JOINT_SOFT_LIMITS_RAD[4][1]
 
 
-def test_joint_5_se_reporta_tambien_si_el_resto_no_converge(part, kin):
-    """-X resuelve P1 (con joint_5 fuera) pero P2 no: ambos casos se ven."""
-    solution = resolve_scan(_profile(part, scan_distance=0.35), _spec("-X"), kin)
+def test_las_articulaciones_se_reportan_aunque_el_otro_punto_no_converja(part, kin):
+    """-Z a 0.45 resuelve P2 (con 2/3/5 fuera) pero P1 no converge: se ve todo."""
+    solution = resolve_scan(_profile(part, scan_distance=0.45), _spec("-Z"), kin)
     assert solution.valid is False
-    assert solution.offending_joints == [5]
-    assert solution.point("P1").solved
-    assert not solution.point("P2").solved
+    assert solution.offending_joints == [2, 3, 5]
+    assert not solution.point("P1").solved
+    assert solution.point("P2").solved
+    assert solution.point("P2").inside_limits is False
+    assert solution.point("P2").offending_joints == [2, 3, 5]
 
 
 def test_el_ordinal_de_articulaciones_es_1_based(kin, part):
@@ -554,15 +572,17 @@ def test_un_barrido_no_alcanzable_no_se_marca_como_valido(part, kin):
 def test_tabla_de_verdad_de_las_seis_caras_a_0_30(part):
     """Estado real medido del cubo de inspección a d=0.30, línea 8 cm.
 
-    Alcanzables: +Z (referencia), +X y -Y.
-    -X se sale de joint_5; -Z se pasa de joints 2/3/5; +Y no converge.
+    Con el boresight del FOV (+Z de tool0) apuntando a la cara:
+    Alcanzables: +Z (referencia), +X y -X.
+    -Y no resuelve (el sensor apunta hacia +Y con la pieza a 0.20 m del robot,
+    joint_3); -Z se pasa de joints 2/3; +Y no converge.
     """
     esperado = {
         "+Z": (True, []),
         "+X": (True, []),
-        "-Y": (True, []),
-        "-X": (False, [5]),
-        "-Z": (False, [2, 3, 5]),
+        "-X": (True, []),
+        "-Y": (False, [3]),
+        "-Z": (False, [2, 3]),
         "+Y": (False, []),
     }
     for face, (valid, offending) in esperado.items():
@@ -575,12 +595,13 @@ def test_tabla_de_verdad_de_las_seis_caras_a_0_30(part):
 # ── 8. Escalón de distancias: dónde aparece el límite real ──────────────
 
 
-@pytest.mark.parametrize("distancia", [0.20, 0.30, 0.40, 0.45, 0.50])
-def test_cara_superior_alcanzable_hasta_0_50(part, kin, distancia):
-    """En +Z la cámara llega a 0.50 m de la mesa, que es la cota de trabajo.
+@pytest.mark.parametrize("distancia", [0.20, 0.30, 0.40, 0.45, 0.50, 0.60, 0.65])
+def test_cara_superior_alcanzable_hasta_0_65(part, kin, distancia):
+    """En +Z la cámara llega con holgura hasta 0.65 m de la mesa.
 
-    Con el rpy de montaje bien convertido a radianes, la cara superior aguanta
-    hasta d=0.50 m medidos desde la mesa; más allá la IK no converge.
+    Apuntando el boresight del FOV (+Z de tool0) a la cara, la muñeca deja de
+    estar exigida: 0.50 m (la cota de trabajo) se alcanza con margen y la IK
+    aguanta hasta 0.65 m; más allá cae fuera por joint_5.
     """
     solution = resolve_scan(_profile(part, scan_distance=distancia), _spec("+Z"), kin)
     assert solution.valid, (
@@ -591,24 +612,23 @@ def test_cara_superior_alcanzable_hasta_0_50(part, kin, distancia):
         assert point.distance_measured == pytest.approx(distancia, abs=1e-6)
 
 
-def test_cara_superior_falla_a_partir_de_0_60(part, kin):
-    solution = resolve_scan(_profile(part, scan_distance=0.60), _spec("+Z"), kin)
+def test_cara_superior_falla_a_0_70(part, kin):
+    solution = resolve_scan(_profile(part, scan_distance=0.70), _spec("+Z"), kin)
     assert solution.valid is False
 
 
-def test_cara_frontal_alcanzable_hasta_0_30_y_no_a_0_35(part, kin):
-    """Contraste con la cara -Y: el límite aparece por debajo de 0.35.
+def test_cara_frontal_no_resuelve_con_la_pieza_pegada_al_robot(part, kin):
+    """La cara -Y queda fuera de alcance con el sensor apuntando hacia +Y.
 
-    El corte está en 0.35 y no en 0.40 porque el alcance se decide contra los
-    límites BLANDOS. A 0.35 la mejor IK de esa cara es
-    joint_3 = +2.5671 rad, que entra en el límite duro (2.6180) pero se sale
-    del blando (2.5180) por 0.0491. El JointSoftLimiter la recortaría y dejaría
-    un error permanente de 0.049 rad contra una tolerancia de 0.01: ese goal
-    no converge. Marcarla inválida es lo correcto.
+    Con la pieza ya a 0.46 m (base_link) y el boresight del FOV hacia +Y
+    (hacia el robot), el brazo no puede situar el sensor delante de la pieza
+    apuntando hacia atrás: -Y no resuelve a 0.20 ni 0.30 m (joints 2/3).
+
+    Es la contrapartida de haber orientado el FOV con +Z de tool0: la cara
+    superior (la cota de trabajo) gana alcance, la frontal pierde.
     """
-    assert resolve_scan(_profile(part, scan_distance=0.30), _spec("-Y"), kin).valid
-    assert not resolve_scan(_profile(part, scan_distance=0.35), _spec("-Y"), kin).valid
-    assert not resolve_scan(_profile(part, scan_distance=0.40), _spec("-Y"), kin).valid
+    for distancia in (0.20, 0.30):
+        assert not resolve_scan(_profile(part, scan_distance=distancia), _spec("-Y"), kin).valid
 
 
 def test_una_solucion_dentro_del_duro_pero_fuera_del_blando_se_rechaza(kin):

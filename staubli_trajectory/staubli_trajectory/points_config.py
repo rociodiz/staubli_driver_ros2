@@ -72,7 +72,7 @@ class PointsConfig:
                 f"orientation_mode debe ser {list(_ORIENTATION_MODES)}. "
                 f"Recibido: {self.orientation_mode!r}"
             )
-        center = raw.get("part_center_base_link", [0.0, 0.66, 0.24])
+        center = raw.get("part_center_base_link", [0.0, 0.46, 0.24])
         if len(center) != 3:
             raise ValueError("'part_center_base_link' debe tener 3 valores [x, y, z].")
         self.part_center_base_link: List[float] = [float(v) for v in center]

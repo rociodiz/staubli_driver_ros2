@@ -151,13 +151,13 @@ def test_la_gui_no_duplicate_calculos_de_geometria(ventana):
 def test_posiciones_iniciales_validadas_desde_la_gui(ventana):
     """+Z a 500 mm de la mesa, de +Y a -Y: P1 y P2 sobre z=0.20+0.50."""
     _regenerar(ventana, margen_start_mm=0, margen_end_mm=0)
-    # P1 = [0, 0.70, 0.70]
+    # P1 = [0, 0.50, 0.70]
     assert _texto(ventana, 0, COL_X) == "+0.000"
-    assert _texto(ventana, 0, COL_Y) == "+0.700"
+    assert _texto(ventana, 0, COL_Y) == "+0.500"
     assert _texto(ventana, 0, COL_Z) == "+0.700"
-    # P2 = [0, 0.62, 0.70]
+    # P2 = [0, 0.42, 0.70]
     assert _texto(ventana, 1, COL_X) == "+0.000"
-    assert _texto(ventana, 1, COL_Y) == "+0.620"
+    assert _texto(ventana, 1, COL_Y) == "+0.420"
     assert _texto(ventana, 1, COL_Z) == "+0.700"
 
 
@@ -345,9 +345,9 @@ def test_reabrir_reconstruye_los_puntos_desde_el_yaml(ventana):
     assert reabierta._scan_face_combo.currentText() == "+Z"
     assert reabierta._scan_distance_spin.value() == DIST_INICIAL_MM
     assert reabierta._scan_length_spin.value() == LARGO_INICIAL_MM
-    assert _texto(reabierta, 0, COL_Y) == "+0.700"
+    assert _texto(reabierta, 0, COL_Y) == "+0.500"
     assert _texto(reabierta, 0, COL_Z) == "+0.700"
-    assert _texto(reabierta, 1, COL_Y) == "+0.620"
+    assert _texto(reabierta, 1, COL_Y) == "+0.420"
     assert _texto(reabierta, 1, COL_Z) == "+0.700"
     assert reabierta._scan_verdict.text().startswith("✓")
 
@@ -473,22 +473,22 @@ def test_cada_margen_desplaza_su_extremo_en_sentido_contrario(ventana):
     base_p1 = _texto(ventana, 0, COL_Y)
     base_p2 = _texto(ventana, 1, COL_Y)
     _regenerar(ventana, largo_mm=80, margen_start_mm=30, margen_end_mm=30)
-    assert _texto(ventana, 0, COL_Y) == "+0.730"  # 0.700 + 0.030
-    assert _texto(ventana, 1, COL_Y) == "+0.590"  # 0.620 - 0.030
-    assert base_p1 == "+0.700"
-    assert base_p2 == "+0.620"
+    assert _texto(ventana, 0, COL_Y) == "+0.530"  # 0.500 + 0.030
+    assert _texto(ventana, 1, COL_Y) == "+0.390"  # 0.420 - 0.030
+    assert base_p1 == "+0.500"
+    assert base_p2 == "+0.420"
 
 
 def test_los_margenes_desplazan_los_extremos_de_forma_independiente(ventana):
     """Mover un margen NO toca el otro extremo."""
     _regenerar(ventana, largo_mm=80, margen_start_mm=0, margen_end_mm=0)
     _regenerar(ventana, largo_mm=80, margen_start_mm=20, margen_end_mm=0)
-    assert _texto(ventana, 0, COL_Y) == "+0.720"  # solo P1 se retranquea
-    assert _texto(ventana, 1, COL_Y) == "+0.620"  # P2 intacto
+    assert _texto(ventana, 0, COL_Y) == "+0.520"  # solo P1 se retranquea
+    assert _texto(ventana, 1, COL_Y) == "+0.420"  # P2 intacto
 
     _regenerar(ventana, largo_mm=80, margen_start_mm=0, margen_end_mm=20)
-    assert _texto(ventana, 0, COL_Y) == "+0.700"  # P1 intacto
-    assert _texto(ventana, 1, COL_Y) == "+0.600"  # solo P2 se avanza
+    assert _texto(ventana, 0, COL_Y) == "+0.500"  # P1 intacto
+    assert _texto(ventana, 1, COL_Y) == "+0.400"  # solo P2 se avanza
 
 
 def test_el_margen_no_mueve_la_altura_ni_la_x(ventana):

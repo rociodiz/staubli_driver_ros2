@@ -114,7 +114,7 @@
         <joint name="${robot_prefix}camera_fixed_joint" type="fixed">
             <parent link="${robot_prefix}sensor_support_link"/>
             <child link="${robot_prefix}camera_link"/>
-            <origin xyz="-0.064522 0.088917 0.014688" rpy="1.570796 0 -0.331612"/>
+            <origin xyz="-0.064522 0.088917 0.014688" rpy="-1.570796 0 -0.331612"/>
         </joint>
 
         <!-- Gazebo Sim RGB camera sensor (simple configuration, no depth). -->
