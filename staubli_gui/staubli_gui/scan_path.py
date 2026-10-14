@@ -4,7 +4,7 @@ Un `ScanPathSpec` describe UN barrido lineal sobre UNA de las seis caras de un
 cubo. La fuente de verdad es geométrica y deliberadamente mínima:
 
     part:           centro y lado del cubo, en base_link
-    scan_distance:  distancia del sensor al PLANO DE APOYO del cubo, en metros
+    scan_distance:  distancia del SENSOR al PLANO DE APOYO del cubo, en metros
     scan_paths[]:   nombre, cara, longitud y sentido de la línea
 
 `scan_distance` se mide desde el plano sobre el que se apoya el cubo —la mesa
@@ -12,6 +12,14 @@ en la celda de inspección—, NO desde su cara superior. La pieza sobresale por
 encima de ese plano y es precisamente el volumen que la cámara debe capturar,
 así que tomar la cara superior como referencia dejaría la cámara demasiado
 baja para barrerla.
+
+**P1/P2 son posiciones del SENSOR** (`sensor_support_link`), no de tool0. Ésa
+es la corrección de la fase 2: antes se situaba tool0 en el punto de barrido y,
+como el soporte va montado ~169 mm por delante de la brida a lo largo del
+boresight, el sensor quedaba en realidad esa distancia más lejos de la
+superficie de lo que decía la tabla. El cálculo `tool0 = sensor · montaje⁻¹` y
+la medición de `distance_measured` desde el ORIGEN del sensor (vía FK) viven en
+`frame_sensor_on_surface()` y `resolve_scan()`.
 
 Los puntos P1/P2 y su validación NO se guardan: son DERIVADOS. Se recalculan
 con `ScanPathStore.resolve()` a partir de la geometría y de la IK real del
@@ -28,25 +36,28 @@ El boresight del FOV es el +X del soporte, que coincide con el **+Z de tool0**
 (`sensor_support_joint` rpy `0 -π/2 π/2`); el soporte Y es la normal del plano
 del FOV y el soporte Z la dirección de la línea roja.
 
-Por eso los puntos se orientan de modo que ese +Z de tool0 (boresight del FOV)
-apunte a la superficie, compensando el montaje con
+Por eso los puntos se orientan de modo que ese +X del soporte (boresight del
+FOV, +Z de tool0) apunte a la superficie. El roll de tool0 lo fija la
+convención histórica
 
     R_tool0 = R_FOV · R_montaje⁻¹
 
-`tool0` está fijo a `link_6` en `xyz="0 0 0.07"` sin rpy, así que
-`R_base_tool0 = R_base_FOV · R_montaje⁻¹` directamente. El valor de
-`R_montaje` se elige además para que la línea roja del FOV quede perpendicular
-al avance del barrido.
+con `R_montaje = RPY(0,-π/2,0)`, elegido para que la línea roja quede
+perpendicular al avance. Sobre esa orientación se RETROCEDE tool0 el vector de
+montaje FÍSICO para que el sensor, y no la brida, quede en la posición pedida.
 
-Consecuencia medida de esta convención: apuntando el +Z de tool0 a la cara, el
-plano del FOV queda perfectamente perpendicular a la superficie y la muñeca
-(`joint_5`) deja de ser el eslabón crítico de la cara superior: +Z (la cota de
-trabajo, 0.50 m desde la mesa) se alcanza holgada y aguanta hasta ~0.65 m. En
-cambio caras en las que el sensor debe apuntar hacia el robot con la pieza de
-por medio (-Y, con la parte ya acercada a 0.20 m del robot) dejan de resolver.
-`resolve()` lo reporta en `ScanPoint.offending_joints` y `ScanPoint.solved` en
-vez de ocultarlo, para que quien use esto distinga "fuera de límites" de "no
-converge".
+`tool0` está fijo a `link_6` en `xyz="0 0 0.07"` sin rpy.
+
+Consecuencia medida de esta convención: apuntando el +X del soporte a la cara,
+el plano del FOV queda perfectamente perpendicular a la superficie y la muñeca
+(`joint_5`) deja de ser el eslabón crítico de la cara superior. Al colocar el
+SENSOR (no tool0) a la distancia pedida, +Z (la cota de trabajo, 0.325 m desde
+la mesa) se alcanza holgada y aguanta hasta ~0.50 m; más allá cae por joint_5.
+En cambio caras en las que el sensor debe apuntar hacia el robot con la pieza
+de por medio (-Y, con la parte ya acercada a 0.20 m del robot) dejan de
+resolver. `resolve()` lo reporta en `ScanPoint.offending_joints` y
+`ScanPoint.solved` en vez de ocultarlo, para que quien use esto distinga "fuera
+de límites" de "no converge".
 
 Nota sobre determinismo: `Tx260lKinematics` es multi-start y sortea sus
 semillas de un `random.Random` cuyo estado avanza en cada llamada, así que
@@ -102,13 +113,31 @@ from .user_points import default_config_dir
 #   1) lleva el +X de la frame de apuntado a +Z de tool0 (el boresight mira a
 #      la cara);
 #   2) deja el +Z de la frame (la "línea") en -X de tool0, perpendicular al
-#      eje de avance [0,-1,0] de la celda.
+#      eje de avance [0,1,0] de la celda (la perpendicularidad no depende del
+#      signo del avance).
 #
 # Todo ello en RADIANES (como <origin rpy> del URDF); el sufijo _DEG del
 # nombre es histórico y engañoso.
 
 CAMERA_MOUNT_RPY_DEG: Tuple[float, float, float] = (0.0, -math.pi / 2.0, 0.0)
 TOOL0_MOUNT_RPY_DEG: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+
+# ─── Montaje FÍSICO del soporte del sensor (sensor_support_link) ─────────
+#
+# Espejo del joint `sensor_support_joint` de staubli_camera.xacro:
+#
+#     <origin xyz="-0.003110 0.016130 0.168690" rpy="0 -1.570796 1.570796"/>
+#
+# NO es lo mismo que `CAMERA_MOUNT_RPY_DEG`, que es un rpy VIRTUAL elegido
+# sólo para fijar el roll de tool0 (deja la línea roja del FOV perpendicular
+# al avance). Éste es el montaje REAL: sensor_support_link +X = tool0 +Z (el
+# boresight), de modo que situar el SENSOR a `scan_distance` del plano de
+# apoyo exige RETROCEDER tool0 el vector de montaje (168.69 mm a lo largo del
+# boresight). Antes se colocaba tool0 en el punto de barrido, lo que dejaba el
+# sensor realmente ~169 mm más lejos de la superficie de lo que decía la tabla.
+SENSOR_FRAME: str = "sensor_support_link"
+SENSOR_MOUNT_XYZ: Tuple[float, float, float] = (-0.003110, 0.016130, 0.168690)
+SENSOR_MOUNT_RPY: Tuple[float, float, float] = (0.0, -math.pi / 2.0, math.pi / 2.0)
 
 # ─── Superficie: las seis caras del cubo ─────────────────────────────────
 
@@ -142,6 +171,15 @@ ROLES: Tuple[str, str] = ("P1", "P2")
 # (spawn de Gazebo), así que el centro en base_link es (0.0, 0.46, 0.24).
 DEFAULT_PART_CENTER: List[float] = [0.0, 0.46, 0.24]
 DEFAULT_PART_SIZE: List[float] = [0.08, 0.08, 0.08]
+
+# Distancia de trabajo inicial, en metros: la distancia óptima del sensor a la
+# superficie inspeccionada. Es configurable (GUI/scan_paths.yaml); este es solo
+# el valor de arranque, en sintonía con
+# `sensor_reference.DEFAULT_WORKING_DISTANCE_M` (la referencia verde). Los dos
+# módulos son independientes a propósito: scan_path describe la geometría de la
+# trayectoria y sensor_reference la del sensor. Un test comprueba que no
+# divergen.
+DEFAULT_SCAN_DISTANCE: float = 0.325
 
 _EPS = 1.0e-9
 _ROTATION_EPS = 1.0e-6
@@ -248,6 +286,42 @@ def camera_optical_axis(rotation: kdl.Rotation) -> List[float]:
     return [float(axis[0]), float(axis[1]), float(axis[2])]
 
 
+def sensor_mount_frame() -> kdl.Frame:
+    """Pose FÍSICA de `sensor_support_link` respecto a `tool0` (mount real)."""
+    return kdl.Frame(
+        kdl.Rotation.RPY(*SENSOR_MOUNT_RPY),
+        kdl.Vector(*SENSOR_MOUNT_XYZ),
+    )
+
+
+def frame_sensor_on_surface(
+    sensor_position: Sequence[float], pointing: Sequence[float]
+) -> Tuple[kdl.Frame, kdl.Frame]:
+    """Devuelve ``(sensor_frame, tool0_frame)`` situando el ORIGEN DEL SENSOR.
+
+    `sensor_frame` es la pose de `sensor_support_link` en base_link con su
+    origen en `sensor_position` y su boresight (+X) apuntando a `pointing`.
+    `tool0_frame` es la pose de la brida que lo materializa.
+
+    El roll de tool0 lo fija la convención histórica
+    (`frame_looking_with_optical_axis`), que mantiene la línea roja del FOV
+    perpendicular al avance. Desde esa orientación se RETROCEDE tool0 el
+    vector de montaje FÍSICO para que sea el sensor —y no la brida— quien
+    quede en la posición pedida. Ésa es la corrección de los ~169 mm.
+    """
+    tool0_dir = frame_looking_with_optical_axis(sensor_position, pointing)
+    mount = sensor_mount_frame()
+    tool0_pos = kdl.Vector(*[float(v) for v in sensor_position]) - tool0_dir.M * mount.p
+    tool0 = kdl.Frame(tool0_dir.M, tool0_pos)
+    return tool0 * mount, tool0
+
+
+def sensor_optical_axis(rotation: kdl.Rotation) -> List[float]:
+    """Boresight del sensor (+X de `sensor_support_link`) en base_link."""
+    axis = rotation * kdl.Vector(1.0, 0.0, 0.0)
+    return [float(axis[0]), float(axis[1]), float(axis[2])]
+
+
 # ─── Fuente de verdad ────────────────────────────────────────────────────
 
 
@@ -269,6 +343,17 @@ class PartBox:
     @property
     def half_size(self) -> float:
         return max(self.size) / 2.0
+
+    def half_extent_along(self, axis: Sequence[float]) -> float:
+        """Semianchura REAL de la caja proyectada sobre `axis` (unitario).
+
+        Es la mitad de la extensión de la pieza a lo largo de la dirección de
+        barrido: define los BORDES reales de la cara sobre los que se aplican
+        los márgenes, en lugar de repartir `line_length` a medias. Para un
+        cubo y un eje alineado con sus lados coincide con `size/2`.
+        """
+        u = _unit(axis)
+        return sum(abs(self.size[i] / 2.0 * u[i]) for i in range(3))
 
     def face_normal(self, face: str) -> List[float]:
         """Normal saliente de la cara indicada."""
@@ -350,7 +435,7 @@ class ScanProfile:
     """Parcela global del barrido: pieza y distancia de escaneo."""
 
     part: PartBox = field(default_factory=PartBox)
-    scan_distance: float = 0.50
+    scan_distance: float = DEFAULT_SCAN_DISTANCE
 
     def __post_init__(self) -> None:
         if not isinstance(self.part, PartBox):
@@ -375,51 +460,61 @@ class ScanProfile:
             )
         return _unit(proyectado)
 
-    def target_positions(self, spec: ScanPathSpec) -> List[List[float]]:
-        """Posiciones de sensor de P1 y P2, en base_link.
+    def scan_span(self, spec: ScanPathSpec) -> List[List[float]]:
+        """Bordes REALES de la zona inspeccionada: ``[entrada, salida]``.
 
-            P1 = centro_apoyo − eje·(L/2 + margen_start) + normal·d
-            P2 = centro_apoyo + eje·(L/2 + margen_end)  + normal·d
+        Se calculan sobre el plano de apoyo, sin el desplazamiento
+        perpendicular: es la huella del barrido sobre la pieza.
 
-        `centro_apoyo` es el centro de la cara opuesta a la que se barre, es
-        decir el plano sobre el que se apoya la pieza. `scan_distance` se
-        aplica desde ahí, de modo que la cámara queda a esa distancia de la
-        MESA y no de la cara superior de la pieza.
+            entrada = borde_entrada  − eje·margen_start
+            salida  = borde_opuesto  + eje·margen_end
 
-        `eje` es el sentido de AVANCE del barrido, P1 -> P2. Con la
-        configuración de la celda (`line_axis = [0,-1,0]`) el barrido va de +Y
-        a -Y: P1 es el extremo de arranque en +Y y P2 el de llegada en -Y.
+        `borde_entrada`/`borde_opuesto` son los extremos REALES de la pieza
+        (extensión de `PartBox` proyectada sobre el avance), no `line_length/2`:
+        así el tramo inspeccionado SIEMPRE contiene a la pieza entera y cada
+        margen cae FUERA de su borde correspondiente. `line_length` es la
+        longitud INSPECIONADA (informativa; por defecto el lado del cubo) y no
+        desplaza los extremos.
 
-        Los márgenes son ASIMÉTRICOS e independientes:
-
-          - `scan_margin_start` extiende P1 hacia -eje, es decir hacia el lado
-            de arranque. Con eje = [0,-1,0] eso es +Y, el lado ANTERIOR a la
-            pieza: el barrido empieza antes de entrar en ella.
-          - `scan_margin_end` extiende P2 hacia +eje, es decir -Y, el lado
-            POSTERIOR: el barrido termina después de salir.
-
-        Margen 0 en cualquiera de los dos deja ese extremo exactamente en el
-        borde de la pieza, que es el comportamiento original.
-
-        El desplazamiento va siempre a lo largo de `eje`, nunca sobre una
-        coordenada suelta: la línea sigue siendo perpendicular a la cara y
-        `scan_distance` constante en todo el recorrido.
+        `eje` es el sentido de AVANCE del barrido, P1 -> P2, tal cual sale de
+        `tangent_axis(spec)`. No se presupone ninguna dirección: el borde de
+        entrada es el de arranque (−eje) y el margen start lo aleja hacia
+        −eje (hacia fuera); el de salida (+eje) lo aleja `margen_end` hacia
+        +eje. Con el sentido por defecto de +Z (`line_axis = [0,1,0]`) el
+        arranque cae en −Y y la llegada en +Y; con `[0,-1,0]` al revés.
         """
-        normal = self.part.face_normal(spec.face)
         center = self.part.support_center(spec.face)
         axis = self.tangent_axis(spec)
-        half_len = spec.line_length / 2.0
-        p1 = _add_scaled(
-            _add_scaled(center, axis, -(half_len + spec.scan_margin_start)),
-            normal,
-            self.scan_distance,
-        )
-        p2 = _add_scaled(
-            _add_scaled(center, axis, half_len + spec.scan_margin_end),
-            normal,
-            self.scan_distance,
-        )
-        return [p1, p2]
+        half_extent = self.part.half_extent_along(axis)
+        entry = _add_scaled(center, axis, -(half_extent + spec.scan_margin_start))
+        exit_ = _add_scaled(center, axis, half_extent + spec.scan_margin_end)
+        return [entry, exit_]
+
+    def target_positions(self, spec: ScanPathSpec) -> List[List[float]]:
+        """Posiciones del SENSOR en P1 y P2, en base_link.
+
+            P1 = entrada + normal·d
+            P2 = salida  + normal·d
+
+        `entrada`/`salida` son los bordes de la zona inspeccionada que devuelve
+        `scan_span` (borde real de la pieza, extendido hacia fuera por el
+        margen correspondiente). `centro_apoyo` es el centro del plano sobre el
+        que se apoya la pieza, así que `scan_distance` se aplica desde ahí: el
+        SENSOR queda a esa distancia de la MESA (cara +Z) o de la propia cara
+        (resto).
+
+        Los márgenes son ASIMÉTRICOS e independientes y se miden siempre a lo
+        largo de `eje` (el avance P1 -> P2), nunca sobre una coordenada suelta:
+        la línea sigue siendo perpendicular a la cara y `scan_distance`
+        constante en todo el recorrido. Margen 0 deja ese extremo exactamente
+        en el borde real de la pieza.
+        """
+        normal = self.part.face_normal(spec.face)
+        entry, exit_ = self.scan_span(spec)
+        return [
+            _add_scaled(entry, normal, self.scan_distance),
+            _add_scaled(exit_, normal, self.scan_distance),
+        ]
 
 
 # ─── Datos derivados ─────────────────────────────────────────────────────
@@ -508,9 +603,15 @@ def resolve_scan(
 ) -> ScanSolution:
     """Deriva P1/P2 de la geometría y los valida con la IK real.
 
-    Los dos puntos comparten orientación (la cámara mira a la cara), lo que
-    garantiza por construcción que la distancia perpendicular se mantiene
-    constante en todo el segmento de escaneo P1 → P2.
+    Los dos puntos comparten orientación (el boresight del sensor mira a la
+    cara), lo que garantiza por construcción que la distancia perpendicular se
+    mantiene constante en todo el segmento P1 → P2.
+
+    P1/P2 son posiciones del SENSOR: la IK se resuelve sobre la pose de tool0
+    que, aplicándole el montaje físico, deja `sensor_support_link` en ese
+    punto. `position_xyz` / `rpy_degrees` describen el SENSOR y
+    `distance_measured` se mide desde el ORIGEN DEL SENSOR (vía FK), no desde
+    tool0.
 
     La IK se encadena (`q_prev`) para que el solver elija la rama continua
     entre puntos y no dé un salto articular en mitad del barrido.
@@ -519,17 +620,19 @@ def resolve_scan(
     positions = profile.target_positions(spec)
     normal = profile.part.face_normal(spec.face)
     optical_dir = _scale(normal, -1.0)
+    mount = sensor_mount_frame()
 
     solution = ScanSolution(spec=spec, profile=profile)
     q_prev: Optional[List[float]] = None
     for role, position in zip(ROLES, positions):
-        frame = frame_looking_with_optical_axis(position, optical_dir)
-        result = kin.inverse_kinematics(frame, q_prev=q_prev)
+        sensor_frame, tool0_frame = frame_sensor_on_surface(position, optical_dir)
+        result = kin.inverse_kinematics(tool0_frame, q_prev=q_prev)
 
         if result.solved:
             inside, per_joint = kin.check_joint_limits(result.q)
             offending = [i + 1 for i, ok in enumerate(per_joint) if not ok]
-            measured = kin.forward_kinematics(result.q).p
+            sensor_world = kin.forward_kinematics(result.q) * mount
+            measured = sensor_world.p
             measured_pos = [float(measured[0]), float(measured[1]), float(measured[2])]
             distance = abs(
                 profile.part.signed_distance_to_support(measured_pos, spec.face)
@@ -542,9 +645,9 @@ def resolve_scan(
             ScanPoint(
                 role=role,
                 position_xyz=[float(v) for v in position],
-                rpy_degrees=_rpy_degrees(frame.M),
-                quaternion_xyzw=[float(v) for v in frame.M.GetQuaternion()],
-                optical_axis=camera_optical_axis(frame.M),
+                rpy_degrees=_rpy_degrees(sensor_frame.M),
+                quaternion_xyzw=[float(v) for v in sensor_frame.M.GetQuaternion()],
+                optical_axis=sensor_optical_axis(sensor_frame.M),
                 q=[float(v) for v in result.q],
                 solved=bool(result.solved),
                 inside_limits=bool(inside),
@@ -638,7 +741,11 @@ class ScanPathStore:
     geometría que lo describe.
     """
 
-    VERSION = 1
+    VERSION = 2
+
+    # Valor de `scan_distance` de la v1 que quedó obsoleto al fijar la
+    # distancia de trabajo en 0.325 m. Se migra al cargar (ver `load`).
+    LEGACY_SCAN_DISTANCE = 0.50
 
     def __init__(self, path: Optional[Path] = None) -> None:
         self.path = Path(path) if path is not None else default_scan_paths_path()
@@ -670,7 +777,20 @@ class ScanPathStore:
         else:
             self.profile.part = part
 
-        distance = raw.get("scan_distance", 0.50)
+        raw_version = raw.get("version", 1)
+        try:
+            raw_version = int(raw_version)
+        except (TypeError, ValueError):
+            raw_version = 1
+
+        distance = raw.get("scan_distance", DEFAULT_SCAN_DISTANCE)
+        # Migración v1 -> v2: la v1 traía 0.50 m por defecto, una distancia que
+        # se descartó al sintonizar el sensor. No es un valor que el usuario
+        # eligiera a propósito, así que se traduce al nuevo defecto.
+        if raw_version < self.VERSION and isinstance(distance, (int, float)) and math.isclose(
+            float(distance), self.LEGACY_SCAN_DISTANCE, abs_tol=1e-9
+        ):
+            distance = DEFAULT_SCAN_DISTANCE
         try:
             self.profile = ScanProfile(
                 part=self.profile.part,

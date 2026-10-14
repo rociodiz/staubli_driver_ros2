@@ -16,6 +16,11 @@
     <xacro:arg name="laser_distance" default="0.50"/>
     <xacro:arg name="laser_width" default="0.30"/>
     <xacro:arg name="laser_line_width" default="0.008"/>
+    <!-- Distancia óptima de trabajo (m): línea verde de referencia del sensor,
+         medida sobre el eje óptico de camera_link. Mismo valor por defecto que
+         sensor_reference.DEFAULT_WORKING_DISTANCE_M y que el "Scan distance"
+         inicial de la GUI (staubli_gui.scan_path.DEFAULT_SCAN_DISTANCE). -->
+    <xacro:arg name="working_distance" default="0.325"/>
 
     <!-- Set the robot name using the property -->
     <xacro:attribute name="name" value="$(arg name)" />
@@ -82,6 +87,7 @@
     <xacro:staubli_camera
         robot_prefix="$(arg robot_prefix)"
         parent_link="$(arg robot_prefix)tool0"
+        working_distance="$(arg working_distance)"
     />
 
     <!-- ROS2 control description -->

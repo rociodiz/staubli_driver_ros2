@@ -26,7 +26,7 @@ from staubli_gui.scan_path import (
     resolve_scan,
 )
 
-DIST_INICIAL_MM = 500
+DIST_INICIAL_MM = 325
 LARGO_INICIAL_MM = 80
 
 # Columnas de la tabla: 0 rol, 1-3 xyz, 4 rpy, 5 distancia, 6 ik, 7 límites,
@@ -126,7 +126,7 @@ def test_regenerar_produce_la_solucion_de_scan_path(ventana):
     solution = _regenerar(ventana, margen_start_mm=0, margen_end_mm=0)
     referencia = resolve_scan(
         ScanProfile(),
-        ScanPathSpec(name="superior_h", face="+Z", line_axis=[0.0, -1.0, 0.0]),
+        ScanPathSpec(name="superior_h", face="+Z", line_axis=[0.0, 1.0, 0.0]),
         None,
     )
     assert solution is not None
@@ -142,23 +142,23 @@ def test_la_gui_no_duplicate_calculos_de_geometria(ventana):
     """No hay coordenadas escritas a mano en gui.py: salen de scan_path."""
     solution = _regenerar(ventana, margen_start_mm=0, margen_end_mm=0)
     esperado = ScanProfile().target_positions(
-        ScanPathSpec(name="x", face="+Z", line_axis=[0.0, -1.0, 0.0])
+        ScanPathSpec(name="x", face="+Z", line_axis=[0.0, 1.0, 0.0])
     )
     for point, objetivo in zip(solution.points, esperado):
         assert point.position_xyz == pytest.approx(objetivo, abs=1e-12)
 
 
 def test_posiciones_iniciales_validadas_desde_la_gui(ventana):
-    """+Z a 500 mm de la mesa, de +Y a -Y: P1 y P2 sobre z=0.20+0.50."""
+    """+Z a 325 mm de la mesa, de -Y a +Y: P1 y P2 sobre z=0.20+0.325."""
     _regenerar(ventana, margen_start_mm=0, margen_end_mm=0)
-    # P1 = [0, 0.50, 0.70]
+    # P1 = [0, 0.42, 0.525]
     assert _texto(ventana, 0, COL_X) == "+0.000"
-    assert _texto(ventana, 0, COL_Y) == "+0.500"
-    assert _texto(ventana, 0, COL_Z) == "+0.700"
-    # P2 = [0, 0.42, 0.70]
+    assert _texto(ventana, 0, COL_Y) == "+0.420"
+    assert _texto(ventana, 0, COL_Z) == "+0.525"
+    # P2 = [0, 0.50, 0.525]
     assert _texto(ventana, 1, COL_X) == "+0.000"
-    assert _texto(ventana, 1, COL_Y) == "+0.420"
-    assert _texto(ventana, 1, COL_Z) == "+0.700"
+    assert _texto(ventana, 1, COL_Y) == "+0.500"
+    assert _texto(ventana, 1, COL_Z) == "+0.525"
 
 
 def test_la_tabla_muestra_los_dos_puntos_con_nombre(ventana):
@@ -249,7 +249,7 @@ def test_un_limite_articular_se_nombra_en_la_tabla(ventana):
 
 def test_la_direccion_por_defecto_se_adapta_a_la_cara(ventana):
     ventana._scan_face_combo.setCurrentText("+Z")
-    assert tuple(ventana._scan_axis_combo.currentData()) == (0.0, -1.0, 0.0)
+    assert tuple(ventana._scan_axis_combo.currentData()) == (0.0, 1.0, 0.0)
     ventana._scan_face_combo.setCurrentText("+X")
     assert tuple(ventana._scan_axis_combo.currentData()) == (0.0, 1.0, 0.0)
 
@@ -300,12 +300,12 @@ def test_guardar_escribe_el_esquema_de_scan_path(ventana):
     ventana.btn_scan_save.click()
     data = yaml.safe_load(ventana._scan_store.path.read_text(encoding="utf-8"))
     assert set(data) == {"version", "part", "scan_distance", "scan_paths"}
-    assert data["version"] == 1
-    assert data["scan_distance"] == pytest.approx(0.50)
+    assert data["version"] == 2
+    assert data["scan_distance"] == pytest.approx(0.325)
     spec = data["scan_paths"][0]
     assert spec["face"] == "+Z"
     assert spec["line_length"] == pytest.approx(0.08)
-    assert spec["line_axis"] == pytest.approx([0.0, -1.0, 0.0])
+    assert spec["line_axis"] == pytest.approx([0.0, 1.0, 0.0])
 
 
 def test_guardar_no_persiste_puntos_ni_validacion(ventana):
@@ -345,10 +345,10 @@ def test_reabrir_reconstruye_los_puntos_desde_el_yaml(ventana):
     assert reabierta._scan_face_combo.currentText() == "+Z"
     assert reabierta._scan_distance_spin.value() == DIST_INICIAL_MM
     assert reabierta._scan_length_spin.value() == LARGO_INICIAL_MM
-    assert _texto(reabierta, 0, COL_Y) == "+0.500"
-    assert _texto(reabierta, 0, COL_Z) == "+0.700"
-    assert _texto(reabierta, 1, COL_Y) == "+0.420"
-    assert _texto(reabierta, 1, COL_Z) == "+0.700"
+    assert _texto(reabierta, 0, COL_Y) == "+0.420"
+    assert _texto(reabierta, 0, COL_Z) == "+0.525"
+    assert _texto(reabierta, 1, COL_Y) == "+0.500"
+    assert _texto(reabierta, 1, COL_Z) == "+0.525"
     assert reabierta._scan_verdict.text().startswith("✓")
 
 
@@ -408,6 +408,17 @@ def test_el_escaneo_mide_la_linea_completa(ventana):
     assert largo_real == pytest.approx(0.08, abs=1e-12)
 
 
+def test_la_longitud_configurada_no_mueve_los_extremos(ventana):
+    """'Longitud barrido' es nominal: P1/P2 solo dependen de los bordes reales."""
+    _regenerar(ventana, largo_mm=80, margen_start_mm=5, margen_end_mm=20)
+    y_80 = (_texto(ventana, 0, COL_Y), _texto(ventana, 1, COL_Y))
+    for largo in (10, 40, 120, 300):
+        _regenerar(ventana, largo_mm=largo, margen_start_mm=5, margen_end_mm=20)
+        assert (_texto(ventana, 0, COL_Y), _texto(ventana, 1, COL_Y)) == y_80
+    # Los extremos son los bordes reales (0.42/0.50) más el margen de cada lado.
+    assert y_80 == ("+0.415", "+0.520")
+
+
 # ── Aislamiento de la fase 2 ──────────────────────────────────────────────
 
 
@@ -457,9 +468,10 @@ def test_varias_configuraciones_conviven_en_el_almacen(ventana, config_dir):
 
 # ── Márgenes asimétricos desde la GUI ────────────────────────────────────
 #
-# P1 se extiende hacia +Y (antes de entrar en la pieza) y P2 hacia -Y (después
-# de salir). Dos controles independientes: P1 es el extremo limitado por
-# joint_5, P2 es el holgado, así que los defaults NO son iguales.
+# Con el sentido por defecto de +Z (line_axis = +Y) P1 arranca en el borde
+# cercano (-Y) y P2 llega al borde opuesto (+Y). El margen de inicio retrasa
+# P1 hacia FUERA (-Y) y el de fin avanza P2 hacia FUERA (+Y). Dos controles
+# independientes: sus defaults NO son iguales.
 
 
 def test_los_margenes_por_defecto_son_asimetricos(ventana):
@@ -473,29 +485,29 @@ def test_cada_margen_desplaza_su_extremo_en_sentido_contrario(ventana):
     base_p1 = _texto(ventana, 0, COL_Y)
     base_p2 = _texto(ventana, 1, COL_Y)
     _regenerar(ventana, largo_mm=80, margen_start_mm=30, margen_end_mm=30)
-    assert _texto(ventana, 0, COL_Y) == "+0.530"  # 0.500 + 0.030
-    assert _texto(ventana, 1, COL_Y) == "+0.390"  # 0.420 - 0.030
-    assert base_p1 == "+0.500"
-    assert base_p2 == "+0.420"
+    assert _texto(ventana, 0, COL_Y) == "+0.390"  # 0.420 - 0.030
+    assert _texto(ventana, 1, COL_Y) == "+0.530"  # 0.500 + 0.030
+    assert base_p1 == "+0.420"
+    assert base_p2 == "+0.500"
 
 
 def test_los_margenes_desplazan_los_extremos_de_forma_independiente(ventana):
     """Mover un margen NO toca el otro extremo."""
     _regenerar(ventana, largo_mm=80, margen_start_mm=0, margen_end_mm=0)
     _regenerar(ventana, largo_mm=80, margen_start_mm=20, margen_end_mm=0)
-    assert _texto(ventana, 0, COL_Y) == "+0.520"  # solo P1 se retranquea
-    assert _texto(ventana, 1, COL_Y) == "+0.420"  # P2 intacto
+    assert _texto(ventana, 0, COL_Y) == "+0.400"  # solo P1 se retranquea
+    assert _texto(ventana, 1, COL_Y) == "+0.500"  # P2 intacto
 
     _regenerar(ventana, largo_mm=80, margen_start_mm=0, margen_end_mm=20)
-    assert _texto(ventana, 0, COL_Y) == "+0.500"  # P1 intacto
-    assert _texto(ventana, 1, COL_Y) == "+0.400"  # solo P2 se avanza
+    assert _texto(ventana, 0, COL_Y) == "+0.420"  # P1 intacto
+    assert _texto(ventana, 1, COL_Y) == "+0.520"  # solo P2 se avanza
 
 
 def test_el_margen_no_mueve_la_altura_ni_la_x(ventana):
     _regenerar(ventana, margen_start_mm=25, margen_end_mm=15)
     for fila in (0, 1):
         assert _texto(ventana, fila, COL_X) == "+0.000"
-        assert _texto(ventana, fila, COL_Z) == "+0.700"
+        assert _texto(ventana, fila, COL_Z) == "+0.525"
 
 
 def test_el_margen_alarga_el_recorrido_de_escaneo(ventana):

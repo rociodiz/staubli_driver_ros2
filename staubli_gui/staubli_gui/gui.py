@@ -68,8 +68,17 @@ from rclpy.qos import (
 )
 from sensor_msgs.msg import Image, JointState
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
-from PySide6.QtCore import QSize, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QImage, QPixmap, QTextCharFormat, QTextCursor
+from PySide6.QtCore import QPointF, QSize, Qt, QTimer
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QImage,
+    QPainter,
+    QPen,
+    QPixmap,
+    QTextCharFormat,
+    QTextCursor,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -118,6 +127,11 @@ from .scan_execution import (
     describe_plan,
     waypoints_to_dicts,
 )
+from .sensor_reference import (
+    CAMERA_HFOV_RAD,
+    DEFAULT_WORKING_DISTANCE_M,
+    working_reference_pixels,
+)
 from .user_points import (
     UserPoint,
     UserPointStore,
@@ -156,10 +170,13 @@ _SCAN_MM = 1000.0
 # eje degenerado). Al cambiar de cara la GUI propone este valor, que el
 # usuario puede sobrescribir. No hay planificación raster.
 #
-# Para la cara +Z el sentido es -Y a propósito: el robot está en el lado -Y de
-# la mesa, así que P1 (+Y) es el lado de delante y P2 (-Y) el de atrás.
+# Para la cara +Z el sentido es +Y a propósito: el robot está en el lado -Y de
+# la mesa, así que el barrido ARRANCA en el borde próximo (-Y) y termina en el
+# lejano (+Y). P1 queda fuera de la pieza por el lado del robot, nunca encima
+# de ella. Es solo el valor PROPUESTO al elegir cara: el sentido es del usuario
+# y el cálculo lo respeta sea cual sea (no presupone +Y ni -Y).
 _SCAN_DEFAULT_AXIS = {
-    "+Z": (0.0, -1.0, 0.0),
+    "+Z": (0.0, 1.0, 0.0),
     "-Z": (1.0, 0.0, 0.0),
     "+X": (0.0, 1.0, 0.0),
     "-X": (0.0, 1.0, 0.0),
@@ -168,31 +185,32 @@ _SCAN_DEFAULT_AXIS = {
 }
 
 # Rangos de los selectores de longitud. La distancia se mide desde la cámara
-# hasta el PLANO DE APOYO (la mesa), no hasta la cara superior de la pieza, y
-# el valor inicial son 500 mm: la distancia a la que está el extremo rojo del
-# cono del sensor (laser_distance), para que esa línea caiga justo en la mesa.
+# hasta el PLANO DE APOYO (la mesa), no hasta la cara superior de la pieza.
+# El valor inicial es la distancia óptima de trabajo (325 mm): el mismo
+# parámetro configurable que la línea verde de referencia del sensor
+# (sensor_reference.DEFAULT_WORKING_DISTANCE_M). El ajuste sigue siendo del
+# usuario; la línea roja del cono FOV no cambia.
 _SCAN_DIST_MIN_MM, _SCAN_DIST_MAX_MM, _SCAN_DIST_STEP_MM = 100, 500, 10
+_SCAN_DIST_DEFAULT_MM = round(DEFAULT_WORKING_DISTANCE_M * _SCAN_MM)
 _SCAN_LEN_MIN_MM, _SCAN_LEN_MAX_MM, _SCAN_LEN_STEP_MM = 10, 500, 5
-# Márgenes ASIMÉTRICOS del barrido, independientes entre sí.
+# Márgenes ASIMÉTRICOS del barrido, independientes entre sí y medidos SIEMPRE a
+# lo largo del sentido de barrido `line_axis` (nunca sobre una coordenada
+# suelta): la línea sigue siendo perpendicular a la cara y `scan_distance`
+# constante en todo el segmento.
 #
-#   scan_margin_start -> extiende P1 hacia el lado de ARRANQUE (antes de entrar
-#                        en la pieza). Con line_axis = [0,-1,0] eso es +Y.
-#   scan_margin_end   -> extiende P2 hacia el lado de LLEGADA (después de
-#                        salir). Con line_axis = [0,-1,0] eso es -Y.
+#   scan_margin_start -> extiende P1 hacia el lado de ARRANQUE, ANTES de entrar
+#                        en la pieza (borde de entrada desplazado hacia fuera).
+#   scan_margin_end   -> extiende P2 hacia el lado de LLEGADA, DESPUÉS de salir
+#                        de la pieza (borde opuesto desplazado hacia fuera).
 #
-# Se miden a lo largo de line_axis, nunca sobre una coordenada suelta: la línea
-# sigue siendo perpendicular a la cara y scan_distance constante.
+# El código no presupone ninguna dirección: con el sentido por defecto de +Z
+# ([0,1,0]) el arranque cae en -Y y la llegada en +Y, pero cualquier otro
+# `line_axis` se recalcula igual (ver `ScanProfile.scan_span`).
 #
-# Los dos valores por defecto NO son el mismo número, y la razón está medida
-# con la IK real sobre joint_5 (soft limit −1.9944 rad):
-#
-#   - P1 es el extremo LIMITADO. A 5 mm quedan 0.0119 rad de holgura, a 8 mm
-#     solo 0.0028, y a 10 mm la solución ya viola el límite (-0.0035). El
-#     máximo de P1 está en torno a 8 mm, así que 5 mm es el valor prudente.
-#   - P2 es el extremo HOLGADO: avanzar en -Y aleja joint_5 de su límite, no lo
-#     acerca. A 20 mm quedan 0.1913 rad de holgura, de sobra.
-#
-# Por eso start y end son campos separados: el lado que manda es P1.
+# Los dos valores por defecto NO son el mismo número porque los extremos no
+# tienen la misma holgura cinemática sobre joint_5 (soft limit −1.9944 rad): el
+# de arranque es el más exigido (5 mm, prudente) y el de llegada el holgado
+# (20 mm, de sobra). Ambos están medidos con la IK real y son ajustables.
 _SCAN_MARGIN_MIN_MM, _SCAN_MARGIN_MAX_MM, _SCAN_MARGIN_STEP_MM = 0, 200, 5
 _SCAN_MARGIN_START_DEFAULT_MM = 5
 _SCAN_MARGIN_END_DEFAULT_MM = 20
@@ -1013,8 +1031,11 @@ class MainWindow(QMainWindow):
         fila(0, "Cara:", self._scan_face_combo)
 
         # Distancias y longitudes en MILÍMETROS (scan_path trabaja en metros).
+        # Arranca en la distancia óptima de trabajo (325 mm); la línea verde
+        # de la vista de cámara usa este mismo valor como referencia.
         self._scan_distance_spin = self._scan_mm_spin(
-            500, _SCAN_DIST_MIN_MM, _SCAN_DIST_MAX_MM, _SCAN_DIST_STEP_MM,
+            _SCAN_DIST_DEFAULT_MM, _SCAN_DIST_MIN_MM, _SCAN_DIST_MAX_MM,
+            _SCAN_DIST_STEP_MM,
             "mm de distancia de la cámara a la MESA (plano de apoyo), no a "
             "la cara superior de la pieza",
         )
@@ -1022,7 +1043,9 @@ class MainWindow(QMainWindow):
 
         self._scan_length_spin = self._scan_mm_spin(
             80, _SCAN_LEN_MIN_MM, _SCAN_LEN_MAX_MM, _SCAN_LEN_STEP_MM,
-            "mm de recorrido del barrido sobre la pieza",
+            "Longitud NOMINAL de la franja a inspeccionar (informativa). El "
+            "recorrido real P1->P2 NO depende de este valor: lo fijan los "
+            "bordes REALES de la pieza más los márgenes de inicio y fin",
         )
         fila(2, "Longitud barrido:", self._scan_length_spin)
 
@@ -1030,17 +1053,17 @@ class MainWindow(QMainWindow):
             _SCAN_MARGIN_START_DEFAULT_MM,
             _SCAN_MARGIN_MIN_MM, _SCAN_MARGIN_MAX_MM, _SCAN_MARGIN_STEP_MM,
             "mm que se ANTICIPA el inicio del barrido: P1 se retranquea hacia "
-            "+Y, antes de entrar en la pieza. OJO: es el extremo limitado por "
-            "joint_5; por encima de ~8 mm la solución deja de ser válida",
+            "FUERA, antes del borde de entrada de la pieza (lado de arranque, "
+            "según el sentido configurado)",
         )
         fila(3, "Margen inicio:", self._scan_margin_start_spin)
 
         self._scan_margin_end_spin = self._scan_mm_spin(
             _SCAN_MARGIN_END_DEFAULT_MM,
             _SCAN_MARGIN_MIN_MM, _SCAN_MARGIN_MAX_MM, _SCAN_MARGIN_STEP_MM,
-            "mm que se APLAZA el final del barrido: P2 se avanza hacia -Y, "
-            "después de salir de la pieza. Este extremo es holgado, aleja "
-            "joint_5 de su límite",
+            "mm que se APLAZA el final del barrido: P2 se avanza hacia "
+            "FUERA, después del borde opuesto de la pieza (lado de llegada, "
+            "según el sentido configurado)",
         )
         fila(4, "Margen final:", self._scan_margin_end_spin)
 
@@ -1259,6 +1282,12 @@ class MainWindow(QMainWindow):
         for err in self._scan_store.errors:
             self._log("warning", f"[BARRIDO] {err}")
 
+        profile = self._scan_store.profile
+        # La línea verde de la cámara usa la MISMA distancia de trabajo que el
+        # perfil cargado (aunque no haya barridos guardados), para que nunca
+        # diverjan el valor mostrado y la referencia proyectada.
+        self._scan_distance_spin.setValue(_mm_to_spin(profile.scan_distance))
+
         specs = self._scan_store.all()
         if not specs:
             self._scan_solution = None
@@ -1270,7 +1299,6 @@ class MainWindow(QMainWindow):
             return
 
         spec = specs[0]
-        profile = self._scan_store.profile
         # Rellena los controles con la fuente de verdad guardada.
         self._scan_face_combo.setCurrentText(spec.face)
         self._scan_distance_spin.setValue(_mm_to_spin(profile.scan_distance))
@@ -1999,7 +2027,39 @@ class MainWindow(QMainWindow):
                 f"Fallo al convertir /camera/image_raw: {exc}"
             )
             return
+        self._draw_working_reference(image)
         self._camera_view.set_frame(image)
+
+    def _draw_working_reference(self, image: QImage) -> None:
+        """Superpone la línea verde del ancho de FOV a la distancia de trabajo.
+
+        La distancia es la que muestra ahora "Scan distance" (el mismo
+        parámetro configurable que la trayectoria y el que carga el perfil
+        guardado). La geometría —el segmento del abanico FOV del STL a esa
+        distancia, proyectado con la cámara alineada al boresight— la resuelve
+        sensor_reference (módulo puro y testeable); aquí sólo se pinta sobre la
+        copia de la imagen, sin tocar el mensaje ROS. El segmento puede salirse
+        del marco (el abanico es más ancho que el FOV de la cámara): el
+        recorte lo hace el propio QPainter.
+        """
+        spin = getattr(self, "_scan_distance_spin", None)
+        if spin is None:
+            return
+        try:
+            distance = _spin_to_m(spin.value())
+            p0, p1 = working_reference_pixels(
+                distance, image.width(), image.height(), CAMERA_HFOV_RAD
+            )
+        except Exception:  # noqa: BLE001 - un fallo de dibujo no rompe la GUI
+            return
+        painter = QPainter(image)
+        try:
+            pen = QPen(QColor(_VERDE))
+            pen.setWidth(2)
+            painter.setPen(pen)
+            painter.drawLine(QPointF(p0[0], p0[1]), QPointF(p1[0], p1[1]))
+        finally:
+            painter.end()
 
     # ── ROS 2: estado de los controladores (modo exclusivo) ─────────────
     def _poll_controller_status(self) -> None:

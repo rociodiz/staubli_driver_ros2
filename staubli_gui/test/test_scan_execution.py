@@ -41,7 +41,7 @@ def solution():
     """Solución real de barrido (usa la cinemática de verdad, sin ROS)."""
     return resolve_scan(
         ScanProfile(),
-        ScanPathSpec(name=NOMBRE, face=CARA, line_axis=[0.0, -1.0, 0.0]),
+        ScanPathSpec(name=NOMBRE, face=CARA, line_axis=[0.0, 1.0, 0.0]),
         load_kinematics(),
     )
 

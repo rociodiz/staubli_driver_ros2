@@ -16,6 +16,7 @@ import pytest
 import yaml
 
 from staubli_gui.scan_path import (
+    DEFAULT_SCAN_DISTANCE,
     FACE_NORMALS,
     ROLES,
     PartBox,
@@ -26,6 +27,7 @@ from staubli_gui.scan_path import (
     frame_looking_with_optical_axis,
     load_kinematics,
     resolve_scan,
+    sensor_mount_frame,
 )
 from staubli_trajectory.tx2_60l_ik import (
     SAFETY_POSITION_MARGIN_RAD,
@@ -42,14 +44,29 @@ LINE_LENGTH = 0.08
 
 # Geometría real de la celda de inspección, en base_link: la mesa está a z=0.20,
 # la pieza (world y=0.46) a 0.20 m del robot, y la cámara barre la cara superior
-# a 0.50 m de la mesa, de +Y a -Y.
+# a 0.50 m de la mesa, de -Y (entrada, lado del robot) a +Y (salida).
 TABLE_Z = 0.20
-P1_ESPERADO = [0.0, 0.50, 0.70]
-P2_ESPERADO = [0.0, 0.42, 0.70]
+P1_ESPERADO = [0.0, 0.42, 0.70]
+P2_ESPERADO = [0.0, 0.50, 0.70]
+
+# ── Distancia de trabajo por defecto (configurable) ──────────────────────
+
+
+def test_el_defecto_de_distancia_es_la_distancia_de_trabajo():
+    """El arranque usa 325 mm: la distancia óptima de trabajo, configurable."""
+    assert DEFAULT_SCAN_DISTANCE == pytest.approx(0.325)
+    assert ScanProfile().scan_distance == pytest.approx(DEFAULT_SCAN_DISTANCE)
+
+
+def test_el_store_sin_fichero_usa_el_defecto(config_dir):
+    """Sin YAML previo, el perfil arranca en la distancia de trabajo."""
+    store = ScanPathStore()
+    assert store.profile.scan_distance == pytest.approx(DEFAULT_SCAN_DISTANCE)
+
 
 # Tangente por cara: la línea de barrido nunca puede ser paralela a la normal.
 LINE_AXIS = {
-    "+Z": [0.0, -1.0, 0.0],
+    "+Z": [0.0, 1.0, 0.0],
     "-Z": [0.0, -1.0, 0.0],
     "+Y": [1.0, 0.0, 0.0],
     "-Y": [1.0, 0.0, 0.0],
@@ -86,12 +103,13 @@ def _spec(
     name="superior_h",
     scan_margin_start=0.0,
     scan_margin_end=0.0,
+    line_axis=None,
 ):
     return ScanPathSpec(
         name=name,
         face=face,
         line_length=line_length,
-        line_axis=list(LINE_AXIS[face]),
+        line_axis=list(line_axis) if line_axis is not None else list(LINE_AXIS[face]),
         scan_margin_start=scan_margin_start,
         scan_margin_end=scan_margin_end,
     )
@@ -116,9 +134,12 @@ def test_distancia_de_p1_y_p2_es_exactamente_scan_distance(part, kin):
         assert point.distance_error == pytest.approx(0.0, abs=1e-6)
 
     # La distancia se comprueba contra la FK, no contra la geometría teórica.
+    # P1/P2 son posiciones del SENSOR, así que se mide desde el ORIGEN DE
+    # sensor_support_link (FK de tool0 · montaje físico), no desde tool0.
     soporte_z = part.support_center("+Z")[2]
+    mount = sensor_mount_frame()
     measured = [
-        abs(kin.forward_kinematics(p.q).p.z() - soporte_z)
+        abs((kin.forward_kinematics(p.q) * mount).p.z() - soporte_z)
         for p in solution.points
     ]
     assert measured == pytest.approx([SCAN_DISTANCE] * 2, abs=1e-6)
@@ -153,7 +174,7 @@ def test_la_camara_queda_a_la_distancia_de_la_mesa(part, kin):
         assert z - TABLE_Z == pytest.approx(SCAN_DISTANCE, abs=1e-9)
 
 
-# ── 2. El barrido va de +Y a -Y y termina en P2, sin P3 ─────────────────
+# ── 2. El barrido va de -Y a +Y y termina en P2, sin P3 ─────────────────
 
 
 def test_la_solucion_no_tiene_P3(part, kin):
@@ -163,12 +184,13 @@ def test_la_solucion_no_tiene_P3(part, kin):
     assert solution.point("P3") is None
 
 
-def test_el_barrido_va_de_mas_Y_a_menos_Y(part, kin):
+def test_el_barrido_va_de_menos_Y_a_mas_Y(part, kin):
+    """Sentido por defecto de +Z ([0,1,0]): entra por -Y y sale por +Y."""
     solution = resolve_scan(_profile(part), _spec(), kin)
     p1, p2 = solution.point("P1"), solution.point("P2")
-    assert p1.position_xyz[1] == pytest.approx(0.50, abs=1e-9)
-    assert p2.position_xyz[1] == pytest.approx(0.42, abs=1e-9)
-    assert p1.position_xyz[1] > p2.position_xyz[1]
+    assert p1.position_xyz[1] == pytest.approx(0.42, abs=1e-9)
+    assert p2.position_xyz[1] == pytest.approx(0.50, abs=1e-9)
+    assert p1.position_xyz[1] < p2.position_xyz[1]
 
 
 def test_las_coordenadas_de_referencia_son_las_de_la_celda(part, kin):
@@ -191,6 +213,59 @@ def test_el_barrido_cubre_el_tamano_de_la_piezo(part, kin):
     assert solution.scan_length == pytest.approx(LADO, abs=1e-12)
 
 
+# ── Bordes reales: cobertura de la pieza y sentido configurado ────────────
+
+
+def _proj(vec, axis):
+    return sum(a * b for a, b in zip(vec, axis))
+
+
+@pytest.mark.parametrize("face", list(FACE_NORMALS))
+def test_la_zona_inspeccionada_cubre_la_pieza_y_deja_los_margenes_fuera(part, face):
+    """scan_span: el tramo contiene la pieza entera y cada margen cae FUERA."""
+    profile = _profile(part)
+    spec = _spec(face=face, scan_margin_start=0.012, scan_margin_end=0.03)
+    axis = profile.tangent_axis(spec)
+    half = part.half_extent_along(axis)
+    centro = _proj(part.support_center(face), axis)
+    entrada, salida = profile.scan_span(spec)
+    e, s = _proj(entrada, axis), _proj(salida, axis)
+    # [e, s] contiene la pieza completa (centro ± half)...
+    assert e <= centro - half + 1e-12
+    assert s >= centro + half - 1e-12
+    # ...y cada margen mide exactamente lo configurado, por fuera del borde.
+    assert (centro - half) - e == pytest.approx(spec.scan_margin_start, abs=1e-9)
+    assert s - (centro + half) == pytest.approx(spec.scan_margin_end, abs=1e-9)
+    assert s - e >= 2 * half
+
+
+def test_el_sentido_configurado_decide_el_borde_de_entrada(part, kin):
+    """No se presupone +Y/-Y: al invertir line_axis se intercambian P1 y P2."""
+    profile = _profile(part)
+    avance = resolve_scan(profile, _spec(line_axis=[0.0, 1.0, 0.0]), kin)
+    reverso = resolve_scan(profile, _spec(line_axis=[0.0, -1.0, 0.0]), kin)
+    assert avance.point("P1").position_xyz[1] < avance.point("P2").position_xyz[1]
+    assert reverso.point("P1").position_xyz[1] > reverso.point("P2").position_xyz[1]
+    # Los dos extremos son los mismos bordes reales, solo cambia el orden.
+    ys = [avance.point(r).position_xyz[1] for r in ("P1", "P2")]
+    assert min(ys) == pytest.approx(0.42, abs=1e-9)
+    assert max(ys) == pytest.approx(0.50, abs=1e-9)
+
+
+def test_target_positions_es_scan_span_desplazado_por_la_normal(part):
+    """target_positions = bordes de scan_span + scan_distance por la normal."""
+    profile = _profile(part)
+    spec = _spec(scan_margin_start=0.01, scan_margin_end=0.02)
+    normal = part.face_normal(spec.face)
+    entrada, salida = profile.scan_span(spec)
+    p1, p2 = profile.target_positions(spec)
+    for borde, punto in ((entrada, p1), (salida, p2)):
+        assert punto == pytest.approx(
+            [borde[i] + normal[i] * profile.scan_distance for i in range(3)],
+            abs=1e-12,
+        )
+
+
 def test_P1_y_P2_estan_a_la_misma_altura(part, kin):
     solution = resolve_scan(_profile(part), _spec(), kin)
     p1, p2 = solution.point("P1"), solution.point("P2")
@@ -199,36 +274,67 @@ def test_P1_y_P2_estan_a_la_misma_altura(part, kin):
 
 # ── Márgenes asimétricos (scan_margin_start / scan_margin_end) ────────────
 #
-# Con LINE_AXIS["+Z"] = [0,-1,0]: P1 se extiende hacia +Y (antes de entrar) y
-# P2 hacia -Y (después de salir). Los dos márgenes son independientes.
+# Con LINE_AXIS["+Z"] = [0,1,0] (por defecto): P1 se extiende hacia -Y (antes de
+# entrar) y P2 hacia +Y (después de salir). Los dos márgenes son independientes.
 
 
 def test_sin_margenes_los_extremos_caen_en_la_pieza(part, kin):
     """Con ambos márgenes a 0 se conserva el comportamiento anterior."""
     solution = resolve_scan(_profile(part), _spec(), kin)
     p1, p2 = solution.point("P1"), solution.point("P2")
-    assert p1.position_xyz[1] == pytest.approx(0.50, abs=1e-9)
-    assert p2.position_xyz[1] == pytest.approx(0.42, abs=1e-9)
+    assert p1.position_xyz[1] == pytest.approx(0.42, abs=1e-9)
+    assert p2.position_xyz[1] == pytest.approx(0.50, abs=1e-9)
+
+
+def test_los_extremos_no_dependen_de_la_longitud_configurada(part, kin):
+    """`line_length` es nominal: los extremos salen de los BORDES reales.
+
+    Cambiar solo `line_length` no debe mover P1/P2 ni alterar el recorrido:
+    la zona inspeccionada siempre abarca la pieza entera (centro ± LADO/2)
+    más los márgenes.
+    """
+    profile = _profile(part)
+    largos = (0.02, 0.08, 0.35, 0.90)
+    referencia_p1 = referencia_p2 = None
+    for largo in largos:
+        solution = resolve_scan(
+            profile,
+            _spec(line_length=largo, scan_margin_start=0.005, scan_margin_end=0.02),
+            kin,
+        )
+        p1 = solution.point("P1").position_xyz
+        p2 = solution.point("P2").position_xyz
+        if referencia_p1 is None:
+            referencia_p1, referencia_p2 = p1, p2
+        else:
+            assert p1 == pytest.approx(referencia_p1, abs=1e-12)
+            assert p2 == pytest.approx(referencia_p2, abs=1e-12)
+    # Los extremos son exactamente los bordes reales (0.42/0.50) ± margen.
+    assert referencia_p1[1] == pytest.approx(0.42 - 0.005, abs=1e-9)
+    assert referencia_p2[1] == pytest.approx(0.50 + 0.02, abs=1e-9)
+    assert solution.scan_length == pytest.approx(
+        LADO + 0.005 + 0.02, abs=1e-9
+    )
 
 
 def test_el_margen_start_saca_P1_antes_de_entrar_en_la_pieza(part, kin):
-    """scan_margin_start retranquea P1 hacia +Y, el lado de arranque."""
+    """scan_margin_start retranquea P1 hacia -Y, el lado de arranque."""
     solution = resolve_scan(
         _profile(part), _spec(scan_margin_start=0.03), kin
     )
     p1 = solution.point("P1")
-    assert p1.position_xyz[1] == pytest.approx(0.50 + 0.03, abs=1e-9)
-    assert p1.position_xyz[1] > 0.50
+    assert p1.position_xyz[1] == pytest.approx(0.42 - 0.03, abs=1e-9)
+    assert p1.position_xyz[1] < 0.42
 
 
 def test_el_margen_end_saca_P2_despues_de_salir_de_la_pieza(part, kin):
-    """scan_margin_end avanza P2 hacia -Y, el lado de llegada."""
+    """scan_margin_end avanza P2 hacia +Y, el lado de llegada."""
     solution = resolve_scan(
         _profile(part), _spec(scan_margin_end=0.03), kin
     )
     p2 = solution.point("P2")
-    assert p2.position_xyz[1] == pytest.approx(0.42 - 0.03, abs=1e-9)
-    assert p2.position_xyz[1] < 0.42
+    assert p2.position_xyz[1] == pytest.approx(0.50 + 0.03, abs=1e-9)
+    assert p2.position_xyz[1] > 0.50
 
 
 def test_los_margenes_son_independientes(part, kin):
@@ -239,8 +345,8 @@ def test_los_margenes_son_independientes(part, kin):
         kin,
     )
     p1, p2 = solution.point("P1"), solution.point("P2")
-    assert p1.position_xyz[1] == pytest.approx(0.53, abs=1e-9)
-    assert p2.position_xyz[1] == pytest.approx(0.415, abs=1e-9)
+    assert p1.position_xyz[1] == pytest.approx(0.39, abs=1e-9)
+    assert p2.position_xyz[1] == pytest.approx(0.505, abs=1e-9)
     # El recorrido total es la suma de lo que aporta cada lado.
     assert solution.scan_length == pytest.approx(
         LINE_LENGTH + 0.03 + 0.005, abs=1e-9
@@ -275,7 +381,7 @@ def test_el_margen_no_altera_la_altura_ni_el_sentido(part, kin):
     p1, p2 = solution.point("P1"), solution.point("P2")
     assert p1.position_xyz[2] == pytest.approx(0.70, abs=1e-9)
     assert p2.position_xyz[2] == pytest.approx(0.70, abs=1e-9)
-    assert p1.position_xyz[1] > p2.position_xyz[1]
+    assert p1.position_xyz[1] < p2.position_xyz[1]
     assert p1.position_xyz[0] == pytest.approx(CENTRO[0], abs=1e-12)
     assert p2.position_xyz[0] == pytest.approx(CENTRO[0], abs=1e-12)
 
@@ -342,13 +448,13 @@ def test_eje_optico_apunta_a_la_superficie_en_las_seis_caras(face):
     assert camera_optical_axis(frame.M) == pytest.approx([-c for c in normal], abs=1e-9)
 
 
-def test_el_boresight_del_fov_es_el_eje_z_de_tool0_y_el_plano_queda_perpendicular(part, kin):
-    """La convención usa el +Z de tool0, boresight del FOV de sensor_support_link.
+def test_el_boresight_del_fov_es_el_eje_x_del_sensor_y_el_plano_queda_perpendicular(part, kin):
+    """`point` describe el SENSOR: su +X es el boresight del FOV.
 
-    Es el arreglo del plano FOV: apuntando el +X del soporte (= +Z de tool0) a
-    la cara, el plano del FOV (cuya normal es el +Y del soporte) queda
-    PERPENDICULAR a la superficie y la línea roja (+Z del soporte) perpendicular
-    al avance del barrido.
+    P1/P2 son posiciones del sensor_support_link, así que la pose guardada es
+    la del SENSOR. Apuntando su +X (que en tool0 es +Z) a la cara, el plano
+    del FOV (cuya normal es el +Y del sensor) queda PERPENDICULAR a la
+    superficie y la línea roja (+Z del sensor) perpendicular al avance.
     """
     import PyKDL as kdl
 
@@ -361,17 +467,16 @@ def test_el_boresight_del_fov_es_el_eje_z_de_tool0_y_el_plano_queda_perpendicula
         kdl.Rotation.RPY(*[math.radians(v) for v in point.rpy_degrees]),
         kdl.Vector(*point.position_xyz),
     )
-    z_tool0 = [c for c in (frame.M * kdl.Vector(0.0, 0.0, 1.0))]
-    assert z_tool0 == pytest.approx(point.optical_axis, abs=1e-6)
+    x_sensor = [c for c in (frame.M * kdl.Vector(1.0, 0.0, 0.0))]
+    assert x_sensor == pytest.approx(point.optical_axis, abs=1e-6)
 
-    # Normal del plano FOV = +Y del soporte: debe quedar horizontal (perpendicular
+    # Normal del plano FOV = +Y del sensor: debe quedar horizontal (perpendicular
     # a la cara superior, cuya normal es +Z del mundo).
-    r_support = kdl.Rotation.RPY(0.0, -math.pi / 2.0, math.pi / 2.0)
-    normal_fov = frame.M * r_support * kdl.Vector(0.0, 1.0, 0.0)
+    normal_fov = frame.M * kdl.Vector(0.0, 1.0, 0.0)
     assert abs(normal_fov[2]) < 1e-6
 
-    # Línea roja = +Z del soporte: perpendicular al eje de avance [0,-1,0].
-    linea = frame.M * r_support * kdl.Vector(0.0, 0.0, 1.0)
+    # Línea roja = +Z del sensor: perpendicular al eje de avance [0,1,0].
+    linea = frame.M * kdl.Vector(0.0, 0.0, 1.0)
     assert abs(linea[1]) < 1e-6
 
 
@@ -544,8 +649,8 @@ def test_se_detecta_joint_5_fuera_de_limites(face, distancia, part, kin):
 
 
 def test_las_articulaciones_se_reportan_aunque_el_otro_punto_no_converja(part, kin):
-    """-Z a 0.45 resuelve P2 (con 2/3/5 fuera) pero P1 no converge: se ve todo."""
-    solution = resolve_scan(_profile(part, scan_distance=0.45), _spec("-Z"), kin)
+    """-Z a 0.30 resuelve P2 (con 2/3/5 fuera) pero P1 no converge: se ve todo."""
+    solution = resolve_scan(_profile(part, scan_distance=0.30), _spec("-Z"), kin)
     assert solution.valid is False
     assert solution.offending_joints == [2, 3, 5]
     assert not solution.point("P1").solved
@@ -572,17 +677,17 @@ def test_un_barrido_no_alcanzable_no_se_marca_como_valido(part, kin):
 def test_tabla_de_verdad_de_las_seis_caras_a_0_30(part):
     """Estado real medido del cubo de inspección a d=0.30, línea 8 cm.
 
-    Con el boresight del FOV (+Z de tool0) apuntando a la cara:
-    Alcanzables: +Z (referencia), +X y -X.
-    -Y no resuelve (el sensor apunta hacia +Y con la pieza a 0.20 m del robot,
-    joint_3); -Z se pasa de joints 2/3; +Y no converge.
+    Con P1/P2 en la posición del SENSOR y su boresight (+X del soporte, que en
+    tool0 es +Z) apuntando a la cara:
+    Sólo +Z (la cota de trabajo) resulta alcanzable. +X y -X resuelven pero se
+    pasan de joint_5; -Z y -Y de joints 2/3/5; +Y no converge.
     """
     esperado = {
         "+Z": (True, []),
-        "+X": (True, []),
-        "-X": (True, []),
-        "-Y": (False, [3]),
-        "-Z": (False, [2, 3]),
+        "+X": (False, [5]),
+        "-X": (False, [5]),
+        "-Y": (False, [2, 3, 5]),
+        "-Z": (False, [2, 3, 5]),
         "+Y": (False, []),
     }
     for face, (valid, offending) in esperado.items():
@@ -595,13 +700,14 @@ def test_tabla_de_verdad_de_las_seis_caras_a_0_30(part):
 # ── 8. Escalón de distancias: dónde aparece el límite real ──────────────
 
 
-@pytest.mark.parametrize("distancia", [0.20, 0.30, 0.40, 0.45, 0.50, 0.60, 0.65])
-def test_cara_superior_alcanzable_hasta_0_65(part, kin, distancia):
-    """En +Z la cámara llega con holgura hasta 0.65 m de la mesa.
+@pytest.mark.parametrize("distancia", [0.20, 0.30, 0.40, 0.45, 0.50])
+def test_cara_superior_alcanzable_hasta_0_50(part, kin, distancia):
+    """En +Z el SENSOR llega con holgura hasta 0.50 m de la mesa.
 
-    Apuntando el boresight del FOV (+Z de tool0) a la cara, la muñeca deja de
-    estar exigida: 0.50 m (la cota de trabajo) se alcanza con margen y la IK
-    aguanta hasta 0.65 m; más allá cae fuera por joint_5.
+    Al colocar el SENSOR (y no tool0) a `scan_distance` de la mesa, tool0 queda
+    ~169 mm MÁS lejos por el montaje físico, así que el alcance real baja hasta
+    0.50 m; a 0.55 m la IK cae fuera por joint_5. La cota de trabajo (0.325 m)
+    queda holgada en el centro de ese rango.
     """
     solution = resolve_scan(_profile(part, scan_distance=distancia), _spec("+Z"), kin)
     assert solution.valid, (
@@ -612,8 +718,8 @@ def test_cara_superior_alcanzable_hasta_0_65(part, kin, distancia):
         assert point.distance_measured == pytest.approx(distancia, abs=1e-6)
 
 
-def test_cara_superior_falla_a_0_70(part, kin):
-    solution = resolve_scan(_profile(part, scan_distance=0.70), _spec("+Z"), kin)
+def test_cara_superior_falla_a_0_55(part, kin):
+    solution = resolve_scan(_profile(part, scan_distance=0.55), _spec("+Z"), kin)
     assert solution.valid is False
 
 
@@ -788,6 +894,43 @@ def test_lectura_tolerante_a_fichero_inexistente(config_dir):
     assert store.names() == []
     assert store.errors == []
     assert store.resolve("nada") is None
+
+
+def test_migracion_v1_mueve_el_defecto_obsoleto_a_la_distancia_de_trabajo(config_dir):
+    """Un `scan_distance` de la v1 igual a 0.50 es el defecto viejo, no una
+    elección del usuario: se migra al nuevo defecto (0.325) al cargar."""
+    (config_dir / "scan_paths.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "part": {"center": [0.0, 0.46, 0.24], "size": [0.08] * 3},
+                "scan_distance": 0.50,
+                "scan_paths": [],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    store = ScanPathStore()
+    assert store.profile.scan_distance == pytest.approx(DEFAULT_SCAN_DISTANCE)
+
+
+def test_migracion_v1_respeta_un_valor_elegido_a_mano(config_dir):
+    """Si la v1 traía una distancia distinta de 0.50, se respeta tal cual."""
+    (config_dir / "scan_paths.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "part": {"center": [0.0, 0.46, 0.24], "size": [0.08] * 3},
+                "scan_distance": 0.35,
+                "scan_paths": [],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    store = ScanPathStore()
+    assert store.profile.scan_distance == pytest.approx(0.35)
 
 
 def test_lectura_tolerante_a_yaml_corrupto(config_dir):

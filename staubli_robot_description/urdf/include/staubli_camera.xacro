@@ -19,7 +19,34 @@
         width:=640
         height:=480
         hfov:=1.0472
+        working_distance:=0.325
+        working_line_width:=0.004
     ">
+        <!-- Green working-distance reference: the REAL width of the FOV fan
+             (SENSOR_BASE_plane.stl) at 'working_distance' along the boresight,
+             laid in the fan's physical plane (sensor_support_link frame).
+             Must match sensor_reference.fov_width_m() in staubli_gui. -->
+        <xacro:property name="fov_x0" value="-0.07018654"/>
+        <xacro:property name="fov_x1" value="0.46481345"/>
+        <xacro:property name="fov_zlo0" value="-0.00093088686"/>
+        <xacro:property name="fov_zhi0" value="0.03030657"/>
+        <xacro:property name="fov_zlo1" value="-0.41145084"/>
+        <xacro:property name="fov_zhi1" value="0.4408265"/>
+        <!-- Lateral offset of the FOV plane with respect to the boresight
+             (sensor_support_link +X). The STL was exported at y ~ -19.82 mm;
+             it is re-centred so the fan (and the green working reference)
+             lies on the boresight axis, which is what scan_path anchors. -->
+        <xacro:property name="fov_plane_y_raw" value="-0.0198237"/>
+        <xacro:property name="fov_plane_y" value="0.0"/>
+        <xacro:property name="fov_t"
+            value="${(working_distance - fov_x0) / (fov_x1 - fov_x0)}"/>
+        <xacro:property name="fov_zlo"
+            value="${fov_zlo0 + fov_t * (fov_zlo1 - fov_zlo0)}"/>
+        <xacro:property name="fov_zhi"
+            value="${fov_zhi0 + fov_t * (fov_zhi1 - fov_zhi0)}"/>
+        <xacro:property name="fov_width" value="${fov_zhi - fov_zlo}"/>
+        <xacro:property name="fov_zcenter" value="${(fov_zhi + fov_zlo) / 2}"/>
+
         <!-- Support + sensor physical geometry (STL) -->
         <link name="${robot_prefix}sensor_support_link">
             <inertial>
@@ -55,6 +82,7 @@
                  1108 triangles, identical geometry and pose: x -70.187..464.813,
                  y -19.829..-19.819, z -411.451..440.826 mm) -->
             <visual name="sensor_support_visual_plane">
+                <origin xyz="0 ${-fov_plane_y_raw} 0" rpy="0 0 0"/>
                 <geometry>
                     <mesh
                         filename="package://staubli_robot_description/meshes/SENSOR_BASE_plane.stl"
@@ -68,15 +96,31 @@
             <!-- Visual 4: red line on the far edge of the FOV plane.
                  Same logic as the old laser_line_visual (thin box, laser_line_width
                  thick) laid along the final edge of the plane:
-                 x = 464.813 mm, y = -19.825 mm, z -411.451..440.826 mm -->
+                 x = 464.813 mm, y = 0 mm (re-centred on the boresight),
+                 z -411.451..440.826 mm -->
             <xacro:property name="laser_line_width" value="0.008"/>
             <visual name="sensor_support_visual_line">
-                <origin xyz="0.464813 -0.019825 0.0146875" rpy="0 0 0"/>
+                <origin xyz="0.464813 0 0.0146875" rpy="0 0 0"/>
                 <geometry>
                     <box size="${laser_line_width} ${laser_line_width} 0.852277"/>
                 </geometry>
                 <material name="sensor_support_line_material">
                     <color rgba="1.0 0.0 0.0 1.0"/>
+                </material>
+            </visual>
+
+            <!-- Visual 5: GREEN working-distance reference, in the fan's own
+                 plane. It spans the real FOV width at 'working_distance' (from
+                 one fan edge to the other), so it is the 3D counterpart of the
+                 green line sensor_reference projects onto /camera/image_raw.
+                 Thin in X and Y, long along Z. -->
+            <visual name="sensor_support_visual_working_reference">
+                <origin xyz="${working_distance} ${fov_plane_y} ${fov_zcenter}" rpy="0 0 0"/>
+                <geometry>
+                    <box size="${working_line_width} ${working_line_width} ${fov_width}"/>
+                </geometry>
+                <material name="sensor_support_working_reference_material">
+                    <color rgba="0.153 0.682 0.376 1.0"/>
                 </material>
             </visual>
             <collision name="sensor_support_collision">
@@ -97,10 +141,12 @@
         </joint>
 
         <!-- Camera frame (no geometry) - reference for real sensor -->
-        <!-- TODO: ESTIMATION PENDING VALIDATION
-             Position/orientation obtained from geometric analysis of STL (surface inclined).
-             Origin at center of inclined face. -Z_local(camera_link) aligned with estimated
-             observation direction (+n_patch). May require adjustment after Gazebo verification. -->
+        <!-- Origin at the centre of the inclined mounting face. Orientation is
+             ALIGNED with the physical boresight (sensor_support_link +X): the
+             ~19 deg yaw misalignment (-0.331612 rad) was removed so the Gazebo
+             RGB camera (+X of camera_link) looks along the FOV fan axis. The
+             physical origin is kept unchanged. The green working-distance
+             reference lives on sensor_support_link, in the fan's plane. -->
         <link name="${robot_prefix}camera_link">
             <inertial>
                 <mass value="0.5"/>
@@ -110,11 +156,12 @@
             </inertial>
         </link>
 
-        <!-- Joint: sensor_support_link -> camera_link -->
+        <!-- Joint: sensor_support_link -> camera_link (orientation aligned to
+             the FOV boresight; origin unchanged) -->
         <joint name="${robot_prefix}camera_fixed_joint" type="fixed">
             <parent link="${robot_prefix}sensor_support_link"/>
             <child link="${robot_prefix}camera_link"/>
-            <origin xyz="-0.064522 0.088917 0.014688" rpy="-1.570796 0 -0.331612"/>
+            <origin xyz="-0.064522 0.088917 0.014688" rpy="-1.570796 0 0"/>
         </joint>
 
         <!-- Gazebo Sim RGB camera sensor (simple configuration, no depth). -->
