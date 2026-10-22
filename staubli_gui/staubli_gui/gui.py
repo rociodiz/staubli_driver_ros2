@@ -112,6 +112,7 @@ from .controller_manager import (
     switch_plan,
 )
 from .frame_control import FrameControlPanel
+from .video_recorder import VideoRecorder, default_video_dir
 from .scan_path import (
     FACE_NORMALS,
     ROLES,
@@ -607,6 +608,7 @@ class MainWindow(QMainWindow):
         self._user_kinematics = None
         self._camera_sub = None  # suscripción a /camera/image_raw
         self._camera_view: CameraView | None = None  # visor de vídeo
+        self._video_recorder = VideoRecorder(self._encode_rgb_to_jpeg)
         self._warned_encoding: str | None = None  # encoding ignorado (1 aviso)
         self._cmd_vel_pub = None  # publisher de /cmd_vel (control manual)
         self._frame_panel: FrameControlPanel | None = None  # control FRAME
@@ -1748,6 +1750,7 @@ class MainWindow(QMainWindow):
         self._fill_goal_tolerances(goal)
 
         self._set_scan_verdict("▶ EJECUTANDO BARRIDO...", _AMARILLO)
+        profile_name = (self._scan_name_edit.text().strip() or "barrido") if hasattr(self, "_scan_name_edit") else "barrido"
         self._run_goal(
             goal=goal,
             button=self.btn_scan_execute,
@@ -1755,6 +1758,7 @@ class MainWindow(QMainWindow):
             ok_text="● BARRIDO COMPLETADO (escaneo P1 → P2)",
             tag="BARRIDO",
             fail_text="● BARRIDO FALLIDO",
+            record_as=profile_name,
         )
 
     def _scan_joint_names(self) -> list[str]:
@@ -1994,14 +1998,56 @@ class MainWindow(QMainWindow):
         except KeyError:
             return None
 
+    @staticmethod
+    def _encode_rgb_to_jpeg(image) -> bytes:
+        """Codifica un QImage (RGB888) a JPEG en memoria (inyectado al grabador)."""
+        from PySide6.QtCore import QByteArray, QBuffer
+        ba = QByteArray()
+        buf = QBuffer(ba)
+        buf.open(QBuffer.WriteOnly)
+        image.save(buf, "JPEG", 90)
+        buf.close()
+        return bytes(ba)
+
+    def _start_scan_recording(self, profile_name: str | None) -> None:
+        if self._video_recorder is None:
+            return
+        if self._video_recorder.start(profile_name):
+            path = self._video_recorder.path
+            if path:
+                self._log("info", f"[VÍDEO] grabación iniciada: {path}")
+        else:
+            err = self._video_recorder.last_error
+            self._log(
+                "warning",
+                f"[VÍDEO] no se pudo iniciar la grabación{(' (' + err + ')') if err else ''}",
+            )
+
+    def _stop_scan_recording(self) -> None:
+        rec = self._video_recorder
+        if rec is None or not rec.is_recording:
+            return
+        path = rec.stop()
+        err = rec.last_error
+        frames = rec.frames
+        dropped = rec.dropped
+        if path and not err:
+            self._log(
+                "ok",
+                f"[VÍDEO] guardado: {path} ({frames} frames, dropped={dropped})",
+            )
+            return
+        self._log(
+            "warning",
+            f"[VÍDEO] no se guardó el vídeo ({frames} frames, dropped={dropped}){(' (' + err + ')') if err else ''}",
+        )
+
     def _on_camera_image(self, msg: Image) -> None:
         """Convierte sensor_msgs/Image ('rgb8') a QImage y actualiza el visor.
 
         El callback se ejecuta en el hilo de la GUI (spin_once desde el
         QTimer), por lo que tocar widgets Qt aquí es seguro.
         """
-        if self._camera_view is None:
-            return
         if msg.encoding != _CAMERA_RGB8:
             if msg.encoding != self._warned_encoding:
                 self._warned_encoding = msg.encoding
@@ -2009,10 +2055,11 @@ class MainWindow(QMainWindow):
                     "warning",
                     f"Cámara: encoding '{msg.encoding}' no soportado (solo 'rgb8')",
                 )
-                self._ros_node.get_logger().warning(
-                    f"/camera/image_raw usa '{msg.encoding}'; se espera "
-                    f"'{_CAMERA_RGB8}'. Visor no actualizado."
-                )
+                if self._ros_node is not None:
+                    self._ros_node.get_logger().warning(
+                        f"/camera/image_raw usa '{msg.encoding}'; se espera "
+                        f"'{_CAMERA_RGB8}'. Visor no actualizado."
+                    )
             return
         try:
             image = QImage(
@@ -2023,9 +2070,14 @@ class MainWindow(QMainWindow):
                 QImage.Format_RGB888,
             ).copy()  # copia propia (desligada del buffer ROS del mensaje)
         except Exception as exc:  # noqa: BLE001 - no romper la GUI
-            self._ros_node.get_logger().error(
-                f"Fallo al convertir /camera/image_raw: {exc}"
-            )
+            if self._ros_node is not None:
+                self._ros_node.get_logger().error(
+                    f"Fallo al convertir /camera/image_raw: {exc}"
+                )
+            return
+        if self._video_recorder is not None:
+            self._video_recorder.add_frame(image, msg.width, msg.height)
+        if self._camera_view is None:
             return
         self._draw_working_reference(image)
         self._camera_view.set_frame(image)
@@ -2794,6 +2846,7 @@ class MainWindow(QMainWindow):
         tag: str,
         fail_text: str | None = None,
         waypoints: list[tuple[str, list[float]]] | None = None,
+        record_as: str | None = None,
     ) -> None:
         """Envío común HOME/P1-P3/TRAYECTORIA/PUNTO: asegura controlador y sigue.
 
@@ -2843,6 +2896,8 @@ class MainWindow(QMainWindow):
             if not self._action_client.server_is_ready():
                 self._finish_motion(f"● {tag}: ACTION SERVER NO DISPONIBLE", _ROJO)
                 return
+            if record_as is not None:
+                self._start_scan_recording(record_as)
             self._set_status(moving_text, _AZUL)
             self._ros_node.get_logger().info(
                 f"{tag}: enviando goal a "
@@ -3059,6 +3114,7 @@ class MainWindow(QMainWindow):
         self._motion_goal_handle = None
         self._wp_pending = None
         self._stop_requested = False
+        self._stop_scan_recording()
         if self._motion_button is not None:
             self._motion_button.setEnabled(True)
             self._motion_button = None
