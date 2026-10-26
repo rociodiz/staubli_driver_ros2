@@ -246,27 +246,37 @@ def _rpy_degrees(rotation: kdl.Rotation) -> List[float]:
 
 
 def frame_looking_with_optical_axis(
-    position: Sequence[float], pointing: Sequence[float]
+    position: Sequence[float],
+    pointing: Sequence[float],
+    tangent: Sequence[float] | None = None,
 ) -> kdl.Frame:
     """Frame de tool0 tal que el **boresight del FOV** (el +X de
     `sensor_support_link`, que en tool0 coincide con +Z) apunta a `pointing`.
 
     Se construye el frame del FOV con X = dirección de apuntado y un
-    referente estable para el resto (mismo criterio que
-    `Tx260lKinematics.orientation_frame_looking_at`, pero sobre el boresight
-    del FOV), y luego se deshace el rpy de montaje:
+    referente estable para el resto, y luego se deshace el rpy de montaje:
 
         R_tool0 = R_FOV · R_montaje⁻¹
 
-    El giro alrededor del eje de apuntado queda fijado de forma determinista:
-    el "arriba" se alinea con +Z del mundo salvo que el apuntado sea casi
-    vertical, en cuyo caso se usa +X como referente para que los ejes no se
-    degeneren.
+    Si se proporciona `tangent` (dirección de barrido en el plano de la cara),
+    el giro alrededor del eje de apuntado se fija de forma coherente con el
+    avance, evitando degeneraciones para cualquier cara plana. En caso contrario
+    se mantiene el criterio histórico (compatibilidad hacia atrás).
     """
     x = _unit(pointing)
-    aux = [1.0, 0.0, 0.0] if abs(x[2]) > 0.99 else [0.0, 0.0, 1.0]
-    z = _unit(_cross(aux, x))
-    y = _cross(z, x)
+    if tangent is not None:
+        t = _unit(tangent)
+        # Proyectar el tangente sobre el plano perpendicular al boresight para
+        # mantenerlo ortogonal y evitar degeneraciones.
+        t = _unit(_sub(t, _scale(x, _dot(t, x))))
+        # Y_sensor perpendicular a ambos (boresight y tangente proyectado)
+        y = _unit(_cross(t, x))
+        # Z_sensor perpendicular al avance, en el plano de la cara
+        z = _cross(x, y)
+    else:
+        aux = [1.0, 0.0, 0.0] if abs(x[2]) > 0.99 else [0.0, 0.0, 1.0]
+        z = _unit(_cross(aux, x))
+        y = _cross(z, x)
     r_cam = _rotation_from_columns(x, y, z)
     r_mount = kdl.Rotation.RPY(*CAMERA_MOUNT_RPY_DEG)
     r_tool0 = r_cam * r_mount.Inverse()
@@ -295,7 +305,9 @@ def sensor_mount_frame() -> kdl.Frame:
 
 
 def frame_sensor_on_surface(
-    sensor_position: Sequence[float], pointing: Sequence[float]
+    sensor_position: Sequence[float],
+    pointing: Sequence[float],
+    tangent: Sequence[float] | None = None,
 ) -> Tuple[kdl.Frame, kdl.Frame]:
     """Devuelve ``(sensor_frame, tool0_frame)`` situando el ORIGEN DEL SENSOR.
 
@@ -303,13 +315,13 @@ def frame_sensor_on_surface(
     origen en `sensor_position` y su boresight (+X) apuntando a `pointing`.
     `tool0_frame` es la pose de la brida que lo materializa.
 
-    El roll de tool0 lo fija la convención histórica
+    El roll de tool0 lo fija la convención
     (`frame_looking_with_optical_axis`), que mantiene la línea roja del FOV
     perpendicular al avance. Desde esa orientación se RETROCEDE tool0 el
     vector de montaje FÍSICO para que sea el sensor —y no la brida— quien
     quede en la posición pedida. Ésa es la corrección de los ~169 mm.
     """
-    tool0_dir = frame_looking_with_optical_axis(sensor_position, pointing)
+    tool0_dir = frame_looking_with_optical_axis(sensor_position, pointing, tangent=tangent)
     mount = sensor_mount_frame()
     tool0_pos = kdl.Vector(*[float(v) for v in sensor_position]) - tool0_dir.M * mount.p
     tool0 = kdl.Frame(tool0_dir.M, tool0_pos)
@@ -621,11 +633,14 @@ def resolve_scan(
     normal = profile.part.face_normal(spec.face)
     optical_dir = _scale(normal, -1.0)
     mount = sensor_mount_frame()
+    tangent = profile.tangent_axis(spec)
 
     solution = ScanSolution(spec=spec, profile=profile)
     q_prev: Optional[List[float]] = None
     for role, position in zip(ROLES, positions):
-        sensor_frame, tool0_frame = frame_sensor_on_surface(position, optical_dir)
+        sensor_frame, tool0_frame = frame_sensor_on_surface(
+            position, optical_dir, tangent=tangent
+        )
         result = kin.inverse_kinematics(tool0_frame, q_prev=q_prev)
 
         if result.solved:

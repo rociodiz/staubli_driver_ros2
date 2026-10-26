@@ -2206,6 +2206,7 @@ class MainWindow(QMainWindow):
         a `after` con ok=True.
         """
         if self._ctrl is None:
+            self._switch_busy = False
             if after is not None:
                 after(False, "controller_manager no disponible")
             return
@@ -2219,6 +2220,7 @@ class MainWindow(QMainWindow):
             return
         plan = switch_plan(mode)
         if not plan["activate"] and not plan["deactivate"]:
+            self._switch_busy = False
             if after is not None:
                 after(True, "sin cambios necesarios")
             return
@@ -2275,9 +2277,13 @@ class MainWindow(QMainWindow):
                 f"CONTROL MANUAL {'ACTIVAR' if active else 'VOLVER'}"
                 " (sin ROS: no publicado)",
             )
+            if self._frame_panel is not None:
+                self._frame_panel.set_toggle_state(getattr(self, "_manual_active", False))
             return
         if self._switch_busy:
             self._log("warning", "CONTROL MANUAL: cambio de controlador en curso, espera")
+            if self._frame_panel is not None:
+                self._frame_panel.set_toggle_state(getattr(self, "_manual_active", False))
             return
         objetivo = "manual" if active else "trayectoria"
         self._log(

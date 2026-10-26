@@ -16,7 +16,7 @@ de fondo vacía la cola y escribe el AVI. Si la cola se llena (disco lento),
 los fotogramas se DESCARTAN en lugar de bloquear la GUI, y el descarte se
 cuenta. `stop()` drena la cola y cierra el fichero sin perder los fotogramas
 ya encolados.
-"""
+""" 
 
 from __future__ import annotations
 
