@@ -111,9 +111,22 @@ from .controller_manager import (
     derive_mode,
     switch_plan,
 )
+try:
+    from .controller_manager import STATE_ACTIVE
+except Exception:
+    from .controller_manager import ACTIVE_STATE as STATE_ACTIVE
+from . import collision_common
+try:
+    from .scan_path import sensor_mount_frame
+except Exception:
+    from .scan_path import sensor_mount_frame  # type: ignore
 from .frame_control import FrameControlPanel
 from .video_recorder import VideoRecorder, default_video_dir
 from .scan_path import (
+    DEFAULT_MAX_TILT_DEG,
+    DEFAULT_PART_CENTER,
+    DEFAULT_PART_SIZE,
+    DEFAULT_SCAN_DISTANCE,
     FACE_NORMALS,
     ROLES,
     PartBox,
@@ -122,6 +135,7 @@ from .scan_path import (
     ScanProfile,
     load_kinematics,
     resolve_scan,
+    sensor_mount_frame,
 )
 from .scan_execution import (
     build_scan_execution,
@@ -1356,11 +1370,18 @@ class MainWindow(QMainWindow):
 
     def _scan_current_profile(self) -> ScanProfile:
         """Construye el ScanProfile desde los controles de la GUI (metros)."""
-        # La pieza se conserva tal cual esté en el almacén (o el defecto).
+        # La pieza y la inclinación máxima se conservan tal cual estén en el
+        # almacén (o los valores por defecto).
         part = self._scan_store.profile.part if self._scan_store else PartBox()
+        max_tilt = (
+            self._scan_store.profile.max_tilt_deg
+            if self._scan_store
+            else DEFAULT_MAX_TILT_DEG
+        )
         return ScanProfile(
             part=PartBox(center=list(part.center), size=list(part.size)),
             scan_distance=_spin_to_m(self._scan_distance_spin.value()),
+            max_tilt_deg=max_tilt,
         )
 
     def _on_scan_regenerate(self) -> None:
@@ -1385,6 +1406,8 @@ class MainWindow(QMainWindow):
         self._scan_solution = solution
         self._render_scan_table(solution)
         self._verdict_for(solution)
+        for warning in solution.warnings:
+            self._log("warning", f"[BARRIDO] {warning}")
 
         if solution.valid:
             self._log(
@@ -1591,15 +1614,61 @@ class MainWindow(QMainWindow):
         return max(
             _SCAN_GOTO_P1_MIN_S, min(_SCAN_GOTO_P1_MAX_S, duracion)
         )
-    def _on_scan_goto_p1(self) -> None:
-        """IR A P1: goal de APROXIMACIÓN, independiente del barrido.
+    def _build_single_goal_from_points(
+        self,
+        q_list,
+        duration_s: float,
+        time_tolerance_s: float = _SCAN_GOTO_P1_TIME_TOL_S,
+    ) -> FollowJointTrajectory.Goal:
+        trajectory = JointTrajectory()
+        trajectory.joint_names = list(_HOME_JOINT_NAMES)
+        n = len(q_list)
+        for i, q in enumerate(q_list):
+            point = JointTrajectoryPoint()
+            point.positions = [float(v) for v in q]
+            if n == 1:
+                point.time_from_start = Duration(seconds=duration_s)
+            else:
+                point.time_from_start = Duration(seconds=duration_s * (i / max(1, n - 1)))
+        goal = FollowJointTrajectory.Goal()
+        goal.trajectory = trajectory
+        self._fill_goal_tolerances(goal, time_tolerance_s=time_tolerance_s)
+        return goal
 
-        Envía únicamente q_medida -> P1, como una trayectoria trapezoidal
-        multi-waypoint con su propio goal. No forma parte del barrido P1 -> P2:
-        no se registra como escaneo y no toca los tiempos del barrido. Al
-        terminar, `/joint_states` confirma la llegada y EJECUTAR BARRIDO queda
-        habilitado.
-        """
+    def _find_alternative_p1_path(self, q_now, q_p1, tag="IR A P1"):
+        """Busca ruta alternativa con puntos intermedios validados."""
+        import random
+
+        kin = load_kinematics()
+        # intentar con punto intermedio levantando / variantes
+        candidates = []
+        # interpolaciones distintas
+        for alpha in (0.3, 0.5, 0.7):
+            qmid = [q_now[i] + alpha * (q_p1[i] - q_now[i]) for i in range(6)]
+            candidates.append([q_now, qmid, q_p1])
+        # intentar con pequeñas desviaciones
+        rng = random.Random(12345)
+        for _ in range(20):
+            qmid = []
+            for i in range(6):
+                qmid.append(q_now[i] + 0.4 * (q_p1[i] - q_now[i]) + rng.uniform(-0.1, 0.1))
+            candidates.append([q_now, qmid, q_p1])
+        # validar cada candidato
+        for cand in candidates:
+            # asegurar q final sea q_p1 exacto
+            cand[-1] = list(q_p1)
+            # construir goal temporal
+            try:
+                goal = self._build_single_goal_from_points(cand, max(3.0, self._scan_goto_p1_duration(q_now, q_p1)))
+                # validar todos los tramos
+                self._validate_goal_collision(goal, tag + " alt")
+                return goal
+            except Exception:
+                continue
+        return None
+
+    def _on_scan_goto_p1(self) -> None:
+        """IR A P1: goal de APROXIMACIÓN, independiente del barrido."""
         if self._motion_active:
             return
         if self._scan_solution is None:
@@ -1644,6 +1713,18 @@ class MainWindow(QMainWindow):
         goal = self._build_single_goal(
             q_p1, duracion, time_tolerance_s=_SCAN_GOTO_P1_TIME_TOL_S
         )
+        # Intentar con ruta alternativa si la directa colisiona
+        try:
+            self._validate_goal_collision(goal, "IR A P1")
+        except Exception as e:
+            self._log("warning", f"[P1] ruta directa rechazada: {e}")
+            alt = self._find_alternative_p1_path(q_now, q_p1, "IR A P1")
+            if alt is None:
+                self._log("error", "[P1] no se encontró una aproximación segura alternaiva")
+                self._set_scan_verdict("✗ SIN RUTA SEGURA A P1 — colisión detectada", _ROJO)
+                return
+            goal = alt
+            self._log("info", "[P1] usando ruta alternativa validada con puntos intermedios")
         self._set_scan_verdict("▶ IR A P1: APROXIMANDO...", _AMARILLO)
         self._run_goal(
             goal=goal,
@@ -1833,10 +1914,10 @@ class MainWindow(QMainWindow):
     def _verdict_for(self, solution) -> None:
         """Veredicto global: la fila más importante de la interfaz."""
         if solution.valid:
-            self._set_scan_verdict(
-                "✓ BARRIDO VÁLIDO  (IK y límites correctos en P1 y P2)",
-                _VERDE,
-            )
+            texto = "✓ BARRIDO VÁLIDO  (IK y límites correctos en P1 y P2)"
+            if solution.warnings:
+                texto += f" — AVISO: {' '.join(solution.warnings)}"
+            self._set_scan_verdict(texto, _VERDE)
             self._set_status("● Barrido: configuración VÁLIDA", _VERDE)
             return
 
@@ -1942,7 +2023,10 @@ class MainWindow(QMainWindow):
         try:
             rclpy.spin_once(self._ros_node, timeout_sec=0)
         except Exception as exc:  # noqa: BLE001 - spin_once lanza al apagarse
-            self._ros_node.get_logger().warn(f"rclpy detenido: {exc}")
+            try:
+                self._ros_node.get_logger().warning(f"rclpy detenido: {exc}")
+            except Exception:
+                print(f"[GUI] rclpy detenido: {exc}")
             self._close_for_shutdown()
             return
         self._publish_manual_twist()
@@ -2872,6 +2956,14 @@ class MainWindow(QMainWindow):
             print(f"[GUI] {tag} sin ROS (placeholder)")
             return
 
+        # Validación previa de colisiones (sensor vs mesa/pieza). Solo aproximada.
+        try:
+            self._validate_goal_collision(goal, tag)
+        except Exception as e:
+            self._log("error", f"{tag}: VALIDACIÓN DE COLISIÓN FALLÓ - {e}")
+            self._finish_motion(f"● {tag}: VALIDACIÓN DE COLISIÓN FALLIDA", _ROJO)
+            return
+
         self._motion_active = True
         self._wp_pending = list(waypoints) if waypoints else None
         self._motion_button = button
@@ -2954,6 +3046,63 @@ class MainWindow(QMainWindow):
         goal.trajectory = self._point_plan.trajectory
         self._fill_goal_tolerances(goal)
         return goal
+
+    def _validate_goal_collision(self, goal: FollowJointTrajectory.Goal, tag: str) -> None:
+        """Validación previa: muestrea trayectoria articular completa.
+        Valida desde estado actual (si disponible) hacia puntos del goal.
+        Solo sensor vs mesa/pieza (AABB). No garantiza robot completo.
+        """
+        try:
+            kin = load_kinematics()
+            mount = sensor_mount_frame()
+            part = PartBox(center=list(DEFAULT_PART_CENTER), size=list(DEFAULT_PART_SIZE))
+        except Exception as e:
+            raise RuntimeError(f"datos incompletos para validación: {e}")
+
+        traj = goal.trajectory
+        if not traj or not traj.points:
+            raise RuntimeError("trayectoria vacía o sin puntos")
+
+        def check_q(q, context: str):
+            try:
+                ql = [float(x) for x in q]
+                if len(ql) < 6:
+                    raise RuntimeError("q incompleto")
+                T = kin.forward_kinematics(ql[:6])
+                if T is None:
+                    raise RuntimeError("FK fallida")
+                Sm = T * mount
+                col, reason = collision_common.check_sensor_environment_collision(Sm, part)
+                if col:
+                    raise RuntimeError(f"COLISIÓN DETECTADA ({context}): {reason} vs mesa/pieza (sensor)")
+            except RuntimeError:
+                raise
+            except Exception as e:
+                raise RuntimeError(f"error validando ({context}): {e}")
+
+        points = traj.points
+        for i, p in enumerate(points):
+            if not hasattr(p, 'positions') or len(p.positions) < 6:
+                raise RuntimeError(f"punto {i} sin posiciones válidas")
+            check_q(list(p.positions)[:6], f"punto {i} ({tag})")
+
+        # Validar desde estado actual si está disponible (crítico para IR A P1 / transiciones)
+        q_now = self._current_joint_q()
+        if q_now is not None and len(q_now) >= 6:
+            qn = list(q_now)[:6]
+            q0 = list(points[0].positions)[:6]
+            for alpha in (0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95):
+                qmid = [qn[j] + alpha * (q0[j] - qn[j]) for j in range(6)]
+                check_q(qmid, f"desde-estado-actual->punto0 alpha={alpha:.2f} ({tag})")
+
+        for i in range(len(points) - 1):
+            p1 = points[i]
+            p2 = points[i + 1]
+            q1 = list(p1.positions)[:6]
+            q2 = list(p2.positions)[:6]
+            for alpha in (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9):
+                qmid = [q1[j] + alpha * (q2[j] - q1[j]) for j in range(6)]
+                check_q(qmid, f"tramo {i}->{i + 1} alpha={alpha:.1f} ({tag})")
 
     def _build_user_trajectory_goal(self) -> FollowJointTrajectory.Goal:
         """Goal multi-waypoint desde la lista del usuario (q ya resuelta).

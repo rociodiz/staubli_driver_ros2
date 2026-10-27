@@ -88,3 +88,13 @@ def test_plan_seguro_desactiva_ambos():
 def test_plan_modo_desconocido_es_vacio():
     plan = switch_plan("desconocido")
     assert plan == {"activate": (), "deactivate": ()}
+
+def test_derive_mode_importable_from_gui_context():
+    from staubli_gui import gui
+    assert hasattr(gui, 'derive_mode')
+
+
+def test_switch_plan_importable():
+    from staubli_gui import gui
+    from staubli_gui.controller_manager import switch_plan
+    assert switch_plan is not None

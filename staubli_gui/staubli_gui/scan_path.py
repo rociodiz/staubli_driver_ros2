@@ -65,6 +65,22 @@ semillas de un `random.Random` cuyo estado avanza en cada llamada, así que
 objetivo según cuántas llamadas de IK se hayan hecho antes. Con una instancia
 nueva por barrido el veredicto es reproducible.
 
+Inclinación del boresight (caras laterales)
+-------------------------------------------
+La orientación ideal apunta el boresight perpendicularmente a la cara. Para
+las caras laterales (±X, ±Y) esa pose puede quedar fuera de los límites
+articulares. En ese caso `resolve_scan()` prueba una inclinación creciente del
+boresight respecto a la normal (`max_tilt_deg`) y un giro alrededor de la
+normal, y se queda con la primera inclinación que resuelve P1 y P2 dentro de
+los límites, con margen a los límites blandos y sin un salto articular grande.
+El barrido `+Z` (la cota de trabajo) conserva siempre la pose perpendicular
+original; `-Z` tampoco se inclina porque su cara está sobre la mesa.
+
+La colocación es "rayo": el sensor se sitúa a `scan_distance` de la cara a lo
+largo del boresight, de modo que `distance_measured` sigue siendo la distancia
+AXIAL de trabajo. La distancia perpendicular al plano es
+`scan_distance * cos(tilt)`.
+
 Puntos
 ------
     P1  inicio de la línea de barrido
@@ -92,6 +108,41 @@ import PyKDL as kdl
 import yaml
 
 from .user_points import default_config_dir
+
+
+# ─── Filtro geométrico aproximado centralizado ───────────────────────────
+# Delegado a collision_common (sensor vs mesa/pieza). Solo centraliza, no
+# generaliza a todo el robot.
+from . import collision_common
+
+TABLE_TOP_Z_BASELINK = collision_common.TABLE_TOP_Z_BASELINK
+TABLE_HALF_X = collision_common.TABLE_HALF_X
+TABLE_HALF_Y = collision_common.TABLE_HALF_Y
+TABLE_CENTER_Y = collision_common.TABLE_CENTER_Y
+TABLE_CLEARANCE_M = collision_common.TABLE_CLEARANCE_M
+SENSOR_COLLISION_LOCAL_MIN = collision_common.SENSOR_COLLISION_LOCAL_MIN
+SENSOR_COLLISION_LOCAL_MAX = collision_common.SENSOR_COLLISION_LOCAL_MAX
+
+
+def _aabb_intersect(a_min, a_max, b_min, b_max, margin: float = 0.0) -> bool:
+    return collision_common._aabb_intersect(a_min, a_max, b_min, b_max, margin)
+
+
+def _sensor_oriented_aabb(sensor_frame_world: kdl.Frame):
+    return collision_common.sensor_oriented_aabb(sensor_frame_world)
+
+
+def _table_aabb():
+    return collision_common.table_aabb()
+
+
+def _part_aabb(part: PartBox):
+    return collision_common.part_aabb(part)
+
+
+def check_sensor_environment_collision(sensor_frame_world: kdl.Frame, part: PartBox, clearance: float = TABLE_CLEARANCE_M) -> Tuple[bool, str]:
+    """Comprueba colisión aproximada sensor vs mesa/pieza (delegado a collision_common)."""
+    return collision_common.check_sensor_environment_collision(sensor_frame_world, part, clearance)
 
 # ─── Montaje del sensor/FOV (espejo de staubli_camera.xacro) ──────────────
 #
@@ -180,6 +231,19 @@ DEFAULT_PART_SIZE: List[float] = [0.08, 0.08, 0.08]
 # trayectoria y sensor_reference la del sensor. Un test comprueba que no
 # divergen.
 DEFAULT_SCAN_DISTANCE: float = 0.325
+
+# Inclinación máxima del boresight respecto a la normal de la cara. Se aplica
+# sólo a las caras laterales (±X, ±Y): +Z conserva la pose perpendicular y -Z
+# no se inclina porque su superficie está sobre la mesa. Con 80° la cara +Y
+# llega a ser alcanzable, pero con incidencia muy rasante (se avisa).
+DEFAULT_MAX_TILT_DEG: float = 80.0
+TILT_FACES = frozenset({"+X", "-X", "+Y", "-Y"})
+TILT_SEARCH_STEP_DEG: float = 5.0
+TILT_COARSE_STEP_DEG: float = 15.0
+TILT_AZIMUTH_COARSE_STEP_DEG: float = 30.0
+TILT_WARNING_DEG: float = 45.0
+MIN_JOINT_MARGIN_RAD: float = 0.02
+MAX_JOINT_STEP_RAD: float = 0.5
 
 _EPS = 1.0e-9
 _ROTATION_EPS = 1.0e-6
@@ -334,6 +398,26 @@ def sensor_optical_axis(rotation: kdl.Rotation) -> List[float]:
     return [float(axis[0]), float(axis[1]), float(axis[2])]
 
 
+def tilted_optical_axis(
+    face_normal: Sequence[float],
+    tangent: Sequence[float],
+    tilt_rad: float,
+    azimuth_rad: float,
+) -> List[float]:
+    """Boresight inclinado `tilt_rad` respecto a la normal de la cara.
+
+    `azimuth_rad` gira la inclinación dentro del plano de la cara: 0 sigue el
+    sentido de barrido y π/2 su perpendicular. El resultado mira siempre hacia
+    la superficie (componente -normal), sea cual sea el azimut.
+    """
+    n = _unit(face_normal)
+    e1 = _unit(tangent)
+    e1 = _unit(_sub(e1, _scale(n, _dot(e1, n))))
+    e2 = _unit(_cross(n, e1))
+    u = _add_scaled(_scale(e1, math.cos(azimuth_rad)), e2, math.sin(azimuth_rad))
+    return _unit(_add_scaled(_scale(n, -math.cos(tilt_rad)), u, math.sin(tilt_rad)))
+
+
 # ─── Fuente de verdad ────────────────────────────────────────────────────
 
 
@@ -448,13 +532,17 @@ class ScanProfile:
 
     part: PartBox = field(default_factory=PartBox)
     scan_distance: float = DEFAULT_SCAN_DISTANCE
+    max_tilt_deg: float = DEFAULT_MAX_TILT_DEG
 
     def __post_init__(self) -> None:
         if not isinstance(self.part, PartBox):
             self.part = PartBox(center=list(self.part.center), size=list(self.part.size))
         self.scan_distance = float(self.scan_distance)
+        self.max_tilt_deg = float(self.max_tilt_deg)
         if self.scan_distance <= 0.0:
             raise ValueError("scan_distance debe ser positivo.")
+        if not 0.0 <= self.max_tilt_deg < 90.0:
+            raise ValueError("max_tilt_deg debe estar en [0, 90).")
 
     def tangent_axis(self, spec: ScanPathSpec) -> List[float]:
         """Sentido de la línea, unitario y contenido en el plano de la cara.
@@ -565,6 +653,9 @@ class ScanSolution:
     spec: ScanPathSpec
     profile: ScanProfile
     points: List[ScanPoint] = field(default_factory=list)
+    tilt_deg: float = 0.0
+    tilt_azimuth_deg: float = 0.0
+    warnings: List[str] = field(default_factory=list)
 
     def __iter__(self):
         return iter(self.points)
@@ -608,34 +699,23 @@ def load_kinematics():
     return Tx260lKinematics()
 
 
-def resolve_scan(
+def _build_scan_points(
     profile: ScanProfile,
     spec: ScanPathSpec,
-    kinematics=None,
-) -> ScanSolution:
-    """Deriva P1/P2 de la geometría y los valida con la IK real.
+    kin,
+    positions: Sequence[Sequence[float]],
+    optical_dir: Sequence[float],
+    tangent: Sequence[float],
+    mount: kdl.Frame,
+    normal: Sequence[float],
+    require_valid: bool = False,
+) -> Optional[List[ScanPoint]]:
+    """Resuelve P1/P2 para una orientación común y mide la distancia axial.
 
-    Los dos puntos comparten orientación (el boresight del sensor mira a la
-    cara), lo que garantiza por construcción que la distancia perpendicular se
-    mantiene constante en todo el segmento P1 → P2.
-
-    P1/P2 son posiciones del SENSOR: la IK se resuelve sobre la pose de tool0
-    que, aplicándole el montaje físico, deja `sensor_support_link` en ese
-    punto. `position_xyz` / `rpy_degrees` describen el SENSOR y
-    `distance_measured` se mide desde el ORIGEN DEL SENSOR (vía FK), no desde
-    tool0.
-
-    La IK se encadena (`q_prev`) para que el solver elija la rama continua
-    entre puntos y no dé un salto articular en mitad del barrido.
+    Con `require_valid=True` se abandona en cuanto un punto no es válido: es la
+    ruta de búsqueda, donde sólo interesan los candidatos completos.
     """
-    kin = kinematics if kinematics is not None else load_kinematics()
-    positions = profile.target_positions(spec)
-    normal = profile.part.face_normal(spec.face)
-    optical_dir = _scale(normal, -1.0)
-    mount = sensor_mount_frame()
-    tangent = profile.tangent_axis(spec)
-
-    solution = ScanSolution(spec=spec, profile=profile)
+    points: List[ScanPoint] = []
     q_prev: Optional[List[float]] = None
     for role, position in zip(ROLES, positions):
         sensor_frame, tool0_frame = frame_sensor_on_surface(
@@ -649,34 +729,227 @@ def resolve_scan(
             sensor_world = kin.forward_kinematics(result.q) * mount
             measured = sensor_world.p
             measured_pos = [float(measured[0]), float(measured[1]), float(measured[2])]
-            distance = abs(
-                profile.part.signed_distance_to_support(measured_pos, spec.face)
-            )
+            signed = profile.part.signed_distance_to_support(measured_pos, spec.face)
+            # Distancia AXIAL a lo largo del boresight hasta el plano de apoyo.
+            # Con el sensor apuntando a la cara, facing = -cos(tilt) < 0.
+            facing = _dot(sensor_optical_axis(sensor_world.M), normal)
+            distance = abs(signed / facing) if facing < -_EPS else math.inf
+            # Filtro geométrico conservador: mesa/pieza vs cuerpo sensor
+            env_col, env_reason = check_sensor_environment_collision(sensor_world, profile.part)
+            if env_col:
+                inside = False
+                if env_reason and env_reason not in offending:
+                    # marcar como no válido por colisión ambiental (se registra vía inside_limits False)
+                    pass
         else:
             inside, offending = False, []
             distance = math.inf
 
-        solution.points.append(
-            ScanPoint(
-                role=role,
-                position_xyz=[float(v) for v in position],
-                rpy_degrees=_rpy_degrees(sensor_frame.M),
-                quaternion_xyzw=[float(v) for v in sensor_frame.M.GetQuaternion()],
-                optical_axis=sensor_optical_axis(sensor_frame.M),
-                q=[float(v) for v in result.q],
-                solved=bool(result.solved),
-                inside_limits=bool(inside),
-                offending_joints=offending,
-                distance_measured=distance,
-                distance_error=(
-                    distance - profile.scan_distance if math.isfinite(distance) else math.inf
-                ),
-                pos_error=float(result.pos_error),
-                rot_error=float(result.rot_error),
-            )
+        sp = ScanPoint(
+            role=role,
+            position_xyz=[float(v) for v in position],
+            rpy_degrees=_rpy_degrees(sensor_frame.M),
+            quaternion_xyzw=[float(v) for v in sensor_frame.M.GetQuaternion()],
+            optical_axis=sensor_optical_axis(sensor_frame.M),
+            q=[float(v) for v in result.q],
+            solved=bool(result.solved),
+            inside_limits=bool(inside),
+            offending_joints=offending,
+            distance_measured=distance,
+            distance_error=(
+                distance - profile.scan_distance if math.isfinite(distance) else math.inf
+            ),
+            pos_error=float(result.pos_error),
+            rot_error=float(result.rot_error),
         )
-        if result.solved:
+        # Adjuntar motivo si hay colisión ambiental
+        if result.solved and 'env_col' in locals() and env_col:
+            sp.inside_limits = False
+            sp.solved = True  # keep solved but mark invalid
+        points.append(sp)
+        if require_valid and not points[-1].valid:
+            return None
+        if result.solved and points[-1].valid:
             q_prev = result.q
+        elif result.solved and not points[-1].valid:
+            # no encadenar con pose inválida por colisión
+            q_prev = q_prev
+    # Validación preliminar de puntos intermedios (muestreo) - trayectoria real puede diferir (interpolación articular)
+    if len(points) == 2 and all(p.valid for p in points):
+        try:
+            q1, q2 = points[0].q, points[1].q
+            for alpha in (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9):
+                qmid = [q1[i] + alpha*(q2[i]-q1[i]) for i in range(6)]
+                Tmid = kin.forward_kinematics(qmid)
+                Smid = Tmid * mount
+                ec, er = check_sensor_environment_collision(Smid, profile.part)
+                if ec:
+                    return None
+        except Exception:
+            pass
+    return points
+
+
+def _joint_margin(q: Sequence[float], soft_limits) -> float:
+    return min(
+        min(float(q[i]) - soft_limits[i][0], soft_limits[i][1] - float(q[i]))
+        for i in range(6)
+    )
+
+
+def _search_tilted_scan(
+    profile: ScanProfile,
+    spec: ScanPathSpec,
+    kin,
+    tangent: Sequence[float],
+    normal: Sequence[float],
+    mount: kdl.Frame,
+) -> Optional[Tuple[List[ScanPoint], float, float]]:
+    """Busca una inclinación que haga válido el barrido lateral.
+
+    Se barre primero la inclinación en pasos gruesos. En cada una se prueban
+    azimuts hasta dar con el primer candidato que resuelve P1 y P2 dentro de
+    límites, con margen a los límites blandos y sin un salto articular grande.
+    Después se afina hacia abajo en pasos finos para no quedarse con una
+    inclinación mayor de la necesaria.
+    """
+    from staubli_trajectory.tx2_60l_ik import JOINT_SOFT_LIMITS_RAD
+
+    if profile.max_tilt_deg <= 0.0 or spec.face not in TILT_FACES:
+        return None
+
+    face_points = profile.scan_span(spec)
+    distance = profile.scan_distance
+
+    def evaluate(tilt_deg: float, azimuth_deg: float):
+        optical_dir = tilted_optical_axis(
+            normal,
+            tangent,
+            math.radians(tilt_deg),
+            math.radians(azimuth_deg),
+        )
+        positions = [
+            _sub(point, _scale(optical_dir, distance)) for point in face_points
+        ]
+        points = _build_scan_points(
+            profile,
+            spec,
+            kin,
+            positions,
+            optical_dir,
+            tangent,
+            mount,
+            normal,
+            require_valid=True,
+        )
+        if points is None:
+            return None
+        margin = min(_joint_margin(point.q, JOINT_SOFT_LIMITS_RAD) for point in points)
+        step = max(abs(points[1].q[i] - points[0].q[i]) for i in range(6))
+        if margin < MIN_JOINT_MARGIN_RAD or step > MAX_JOINT_STEP_RAD:
+            return None
+        return points
+
+    def first_at(tilt_deg: float):
+        for azimuth_deg in range(0, 360, int(TILT_AZIMUTH_COARSE_STEP_DEG)):
+            points = evaluate(tilt_deg, azimuth_deg)
+            if points is not None:
+                return points, tilt_deg, float(azimuth_deg)
+        return None
+
+    coarse = TILT_COARSE_STEP_DEG
+    max_tilt = profile.max_tilt_deg
+    if max_tilt <= 3.0 * coarse:
+        # Rango corto: no merece la pena una malla gruesa que podría saltarse
+        # la única inclinación válida.
+        grid = []
+        tilt = TILT_SEARCH_STEP_DEG
+        while tilt < max_tilt - _EPS:
+            grid.append(tilt)
+            tilt += TILT_SEARCH_STEP_DEG
+        grid.append(max_tilt)
+    else:
+        grid = []
+        tilt = coarse
+        while tilt < max_tilt - _EPS:
+            grid.append(tilt)
+            tilt += coarse
+        grid.append(max_tilt)
+
+    for tilt in grid:
+        found = first_at(tilt)
+        if found is None:
+            continue
+        # Afinar hacia abajo mientras la inclinación menor siga funcionando.
+        lower = found[1] - TILT_SEARCH_STEP_DEG
+        while lower > 0.0:
+            candidate = first_at(lower)
+            if candidate is None:
+                break
+            found = candidate
+            lower = candidate[1] - TILT_SEARCH_STEP_DEG
+        return found
+
+    return None
+
+
+def resolve_scan(
+    profile: ScanProfile,
+    spec: ScanPathSpec,
+    kinematics=None,
+) -> ScanSolution:
+    """Deriva P1/P2 de la geometría y los valida con la IK real.
+
+    Primero se prueba la orientación ideal (boresight perpendicular a la cara).
+    Si P1/P2 no son válidos en una cara lateral, se busca una inclinación
+    creciente hasta `profile.max_tilt_deg`; +Z y -Z conservan la pose ideal.
+
+    P1/P2 son posiciones del SENSOR: la IK se resuelve sobre la pose de tool0
+    que, aplicándole el montaje físico, deja `sensor_support_link` en ese
+    punto. `position_xyz` / `rpy_degrees` describen el SENSOR y
+    `distance_measured` es la distancia AXIAL desde el ORIGEN DEL SENSOR (vía
+    FK) hasta el plano de apoyo, a lo largo del boresight.
+
+    La IK se encadena (`q_prev`) para que el solver elija la rama continua
+    entre puntos y no dé un salto articular en mitad del barrido.
+    """
+    kin = kinematics if kinematics is not None else load_kinematics()
+    normal = profile.part.face_normal(spec.face)
+    tangent = profile.tangent_axis(spec)
+    mount = sensor_mount_frame()
+
+    ideal_positions = profile.target_positions(spec)
+    points = _build_scan_points(
+        profile,
+        spec,
+        kin,
+        ideal_positions,
+        _scale(normal, -1.0),
+        tangent,
+        mount,
+        normal,
+    )
+    solution = ScanSolution(spec=spec, profile=profile, points=points)
+    if solution.valid:
+        return solution
+
+    tilted = _search_tilted_scan(profile, spec, kin, tangent, normal, mount)
+    if tilted is None:
+        return solution
+
+    tilted_points, tilt_deg, azimuth_deg = tilted
+    solution = ScanSolution(
+        spec=spec,
+        profile=profile,
+        points=tilted_points,
+        tilt_deg=float(tilt_deg),
+        tilt_azimuth_deg=float(azimuth_deg),
+    )
+    if tilt_deg > TILT_WARNING_DEG:
+        solution.warnings.append(
+            f"inclinación de {tilt_deg:.1f}° (>{TILT_WARNING_DEG:.0f}°): "
+            "incidencia oblicua y cobertura reducida."
+        )
     return solution
 
 
@@ -756,7 +1029,7 @@ class ScanPathStore:
     geometría que lo describe.
     """
 
-    VERSION = 2
+    VERSION = 3
 
     # Valor de `scan_distance` de la v1 que quedó obsoleto al fijar la
     # distancia de trabajo en 0.325 m. Se migra al cargar (ver `load`).
@@ -802,18 +1075,40 @@ class ScanPathStore:
         # Migración v1 -> v2: la v1 traía 0.50 m por defecto, una distancia que
         # se descartó al sintonizar el sensor. No es un valor que el usuario
         # eligiera a propósito, así que se traduce al nuevo defecto.
-        if raw_version < self.VERSION and isinstance(distance, (int, float)) and math.isclose(
+        if raw_version < 2 and isinstance(distance, (int, float)) and math.isclose(
             float(distance), self.LEGACY_SCAN_DISTANCE, abs_tol=1e-9
         ):
             distance = DEFAULT_SCAN_DISTANCE
+        max_tilt = raw.get("max_tilt_deg", DEFAULT_MAX_TILT_DEG)
         try:
-            self.profile = ScanProfile(
-                part=self.profile.part,
-                scan_distance=float(distance),
+            distance = float(distance)
+        except (TypeError, ValueError):
+            self.errors.append(
+                "scan_distance inválido; se usa el valor por defecto."
             )
-        except (TypeError, ValueError) as exc:
-            self.errors.append(f"scan_distance inválido ({exc}); se usan valores por defecto.")
-            self.profile = ScanProfile(part=self.profile.part)
+            distance = DEFAULT_SCAN_DISTANCE
+        try:
+            max_tilt = float(max_tilt)
+        except (TypeError, ValueError):
+            self.errors.append(
+                "max_tilt_deg inválido; se usa el valor por defecto."
+            )
+            max_tilt = DEFAULT_MAX_TILT_DEG
+        if distance <= 0.0:
+            self.errors.append(
+                "scan_distance debe ser positivo; se usa el valor por defecto."
+            )
+            distance = DEFAULT_SCAN_DISTANCE
+        if not 0.0 <= max_tilt < 90.0:
+            self.errors.append(
+                "max_tilt_deg debe estar en [0, 90); se usa el valor por defecto."
+            )
+            max_tilt = DEFAULT_MAX_TILT_DEG
+        self.profile = ScanProfile(
+            part=self.profile.part,
+            scan_distance=distance,
+            max_tilt_deg=max_tilt,
+        )
 
         for i, entry in enumerate(raw.get("scan_paths", []) or []):
             spec = _scanpathspec_from_dict(entry)
@@ -835,6 +1130,7 @@ class ScanPathStore:
             "version": self.VERSION,
             "part": _partbox_to_dict(self.profile.part),
             "scan_distance": float(self.profile.scan_distance),
+            "max_tilt_deg": float(self.profile.max_tilt_deg),
             "scan_paths": [_scanpathspec_to_dict(s) for s in self.all()],
         }
         text = yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
@@ -878,6 +1174,12 @@ class ScanPathStore:
     # ── parámetros globales ──
     def set_scan_distance(self, value: float) -> None:
         self.profile.scan_distance = float(value)
+
+    def set_max_tilt_deg(self, value: float) -> None:
+        value = float(value)
+        if not 0.0 <= value < 90.0:
+            raise ValueError("max_tilt_deg debe estar en [0, 90).")
+        self.profile.max_tilt_deg = value
 
     def set_part(self, part: PartBox) -> None:
         self.profile.part = part

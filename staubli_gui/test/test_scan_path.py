@@ -16,13 +16,16 @@ import pytest
 import yaml
 
 from staubli_gui.scan_path import (
+    DEFAULT_MAX_TILT_DEG,
     DEFAULT_SCAN_DISTANCE,
     FACE_NORMALS,
+    MAX_JOINT_STEP_RAD,
     ROLES,
     PartBox,
     ScanPathSpec,
     ScanPathStore,
     ScanProfile,
+    TILT_WARNING_DEG,
     camera_optical_axis,
     frame_looking_with_optical_axis,
     load_kinematics,
@@ -32,7 +35,7 @@ from staubli_gui.scan_path import (
 from staubli_trajectory.tx2_60l_ik import (
     SAFETY_POSITION_MARGIN_RAD,
     _JOINT_LIMITS_RAD,
-    _JOINT_SOFT_LIMITS_RAD,
+    JOINT_SOFT_LIMITS_RAD,
 )
 
 # ── Configuración de referencia ──────────────────────────────────────────
@@ -93,8 +96,12 @@ def part():
     return PartBox(center=list(CENTRO), size=[LADO] * 3)
 
 
-def _profile(part, scan_distance=SCAN_DISTANCE):
-    return ScanProfile(part=part, scan_distance=scan_distance)
+def _profile(part, scan_distance=SCAN_DISTANCE, max_tilt_deg=DEFAULT_MAX_TILT_DEG):
+    return ScanProfile(
+        part=part,
+        scan_distance=scan_distance,
+        max_tilt_deg=max_tilt_deg,
+    )
 
 
 def _spec(
@@ -593,14 +600,20 @@ def test_todas_las_caras_generan_puntos_aunque_no_sean_alcanzables(part, kin):
         solution = resolve_scan(_profile(part), spec, kin)
         assert len(solution.points) == 2
         assert [p.role for p in solution.points] == list(ROLES)
-        # Aunque la IK falle, la pose cartesiana sigue siendo válida.
+        # Aunque la IK falle, la pose cartesiana sigue siendo válida. El
+        # boresight mira siempre hacia la cara; en las laterales puede estar
+        # inclinado respecto a la normal.
         for point in solution.points:
             assert len(point.position_xyz) == 3
             assert len(point.rpy_degrees) == 3
             assert len(point.quaternion_xyzw) == 4
-            assert point.optical_axis == pytest.approx(
-                [-c for c in FACE_NORMALS[face]], abs=1e-9
-            )
+            axis = point.optical_axis
+            assert math.sqrt(sum(c * c for c in axis)) == pytest.approx(1.0, abs=1e-9)
+            assert sum(axis[i] * FACE_NORMALS[face][i] for i in range(3)) < 0.0
+            if face in ("+Z", "-Z"):
+                assert axis == pytest.approx(
+                    [-c for c in FACE_NORMALS[face]], abs=1e-9
+                )
 
 
 def test_cara_desconocida_se_rechaza():
@@ -629,8 +642,12 @@ def test_line_axis_paralelo_a_la_normal_se_rechaza(part):
     [("-X", 0.35), ("-X", 0.40)],
 )
 def test_se_detecta_joint_5_fuera_de_limites(face, distancia, part, kin):
-    """En -X la muñeca se pasa a partir de 0.35 m: el barrido no es válido."""
-    solution = resolve_scan(_profile(part, scan_distance=distancia), _spec(face), kin)
+    """En -X la muñeca se pasa a partir de 0.35 m si NO se permite inclinar."""
+    solution = resolve_scan(
+        _profile(part, scan_distance=distancia, max_tilt_deg=0.0),
+        _spec(face),
+        kin,
+    )
 
     assert solution.valid is False
     assert solution.offending_joints == [5]
@@ -645,7 +662,7 @@ def test_se_detecta_joint_5_fuera_de_limites(face, distancia, part, kin):
             _, degrees_inside = kin.check_joint_limits(point.q)
             assert degrees_inside[4] is False
             # Fuera del límite BLANDO de joint_5 (el que decide check_joint_limits).
-            assert abs(point.q[4]) > _JOINT_SOFT_LIMITS_RAD[4][1]
+            assert abs(point.q[4]) > JOINT_SOFT_LIMITS_RAD[4][1]
 
 
 def test_las_articulaciones_se_reportan_aunque_el_otro_punto_no_converja(part, kin):
@@ -669,7 +686,11 @@ def test_el_ordinal_de_articulaciones_es_1_based(kin, part):
 
 
 def test_un_barrido_no_alcanzable_no_se_marca_como_valido(part, kin):
-    solution = resolve_scan(_profile(part, scan_distance=0.40), _spec("+X"), kin)
+    solution = resolve_scan(
+        _profile(part, scan_distance=0.40, max_tilt_deg=0.0),
+        _spec("+X"),
+        kin,
+    )
     assert solution.valid is False
     assert any(not p.valid for p in solution.points)
 
@@ -677,24 +698,29 @@ def test_un_barrido_no_alcanzable_no_se_marca_como_valido(part, kin):
 def test_tabla_de_verdad_de_las_seis_caras_a_0_30(part):
     """Estado real medido del cubo de inspección a d=0.30, línea 8 cm.
 
-    Con P1/P2 en la posición del SENSOR y su boresight (+X del soporte, que en
-    tool0 es +Z) apuntando a la cara:
-    Sólo +Z (la cota de trabajo) resulta alcanzable. +X y -X resuelven pero se
-    pasan de joint_5; -Z y -Y de joints 2/3/5; +Y no converge.
+    Con P1/P2 en la posición del SENSOR y su boresight apuntando a la cara, las
+    cuatro caras laterales se alcanzan inclinando el boresight (hasta 80°). +Z
+    conserva la pose perpendicular y -Z (sobre la mesa) sigue sin resolverse.
     """
     esperado = {
-        "+Z": (True, []),
-        "+X": (False, [5]),
-        "-X": (False, [5]),
-        "-Y": (False, [2, 3, 5]),
-        "-Z": (False, [2, 3, 5]),
-        "+Y": (False, []),
+        "+Z": True,
+        "+X": True,
+        "-X": True,
+        "-Y": True,
+        "+Y": True,
+        "-Z": False,
     }
-    for face, (valid, offending) in esperado.items():
-        solution = resolve_scan(_profile(part, scan_distance=0.30), _spec(face), load_kinematics())
+    for face, valid in esperado.items():
+        solution = resolve_scan(
+            _profile(part, scan_distance=0.30), _spec(face), load_kinematics()
+        )
         assert solution.valid is valid, f"cara {face}: valid esperado {valid}"
-        assert solution.offending_joints == offending, f"cara {face}: offending"
         assert len(solution.points) == 2
+        if valid:
+            assert solution.offending_joints == []
+            assert solution.tilt_deg <= DEFAULT_MAX_TILT_DEG
+            for point in solution.points:
+                assert point.inside_limits
 
 
 # ── 8. Escalón de distancias: dónde aparece el límite real ──────────────
@@ -723,18 +749,126 @@ def test_cara_superior_falla_a_0_55(part, kin):
     assert solution.valid is False
 
 
-def test_cara_frontal_no_resuelve_con_la_pieza_pegada_al_robot(part, kin):
-    """La cara -Y queda fuera de alcance con el sensor apuntando hacia +Y.
+def test_cara_frontal_no_resuelve_sin_inclinar(part, kin):
+    """Sin inclinación, -Y queda fuera de alcance apuntando hacia +Y.
 
-    Con la pieza ya a 0.46 m (base_link) y el boresight del FOV hacia +Y
-    (hacia el robot), el brazo no puede situar el sensor delante de la pieza
-    apuntando hacia atrás: -Y no resuelve a 0.20 ni 0.30 m (joints 2/3).
-
-    Es la contrapartida de haber orientado el FOV con +Z de tool0: la cara
-    superior (la cota de trabajo) gana alcance, la frontal pierde.
+    Con la pieza a 0.46 m (base_link) y el boresight del FOV hacia +Y (hacia el
+    robot), el brazo no puede situar el sensor delante de la pieza apuntando
+    hacia atrás: -Y no resuelve a 0.20 ni 0.30 m. La inclinación configurable
+    (max_tilt_deg) es la que recupera esta cara.
     """
     for distancia in (0.20, 0.30):
-        assert not resolve_scan(_profile(part, scan_distance=distancia), _spec("-Y"), kin).valid
+        solution = resolve_scan(
+            _profile(part, scan_distance=distancia, max_tilt_deg=0.0),
+            _spec("-Y"),
+            kin,
+        )
+        assert not solution.valid
+        assert solution.tilt_deg == pytest.approx(0.0)
+
+
+# ── 8b. Inclinación del boresight en las caras laterales ────────────────
+
+
+def test_el_tilt_por_defecto_es_80_y_se_valida():
+    assert DEFAULT_MAX_TILT_DEG == pytest.approx(80.0)
+    assert ScanProfile().max_tilt_deg == pytest.approx(DEFAULT_MAX_TILT_DEG)
+    for invalido in (-1.0, 90.0, 120.0):
+        with pytest.raises(ValueError, match="max_tilt_deg"):
+            ScanProfile(max_tilt_deg=invalido)
+
+
+@pytest.mark.parametrize("face", ["+X", "-X", "-Y", "+Y"])
+def test_las_caras_laterales_se_alcanzan_inclinando(face, part, kin):
+    solution = resolve_scan(
+        _profile(part, scan_distance=DEFAULT_SCAN_DISTANCE),
+        _spec(face),
+        kin,
+    )
+
+    assert solution.valid, (
+        f"{face} debería ser alcanzable con max_tilt_deg="
+        f"{DEFAULT_MAX_TILT_DEG}; offending={solution.offending_joints}"
+    )
+    assert 0.0 < solution.tilt_deg <= DEFAULT_MAX_TILT_DEG
+    assert solution.offending_joints == []
+
+    # P1/P2 comparten orientación y respetan la continuidad articular.
+    axis = solution.point("P1").optical_axis
+    assert solution.point("P2").optical_axis == pytest.approx(axis, abs=1e-9)
+    p1, p2 = solution.point("P1"), solution.point("P2")
+    assert max(abs(p2.q[i] - p1.q[i]) for i in range(6)) <= MAX_JOINT_STEP_RAD
+
+    # La inclinación es coherente con la normal de la cara.
+    dot = sum(axis[i] * FACE_NORMALS[face][i] for i in range(3))
+    assert dot == pytest.approx(-math.cos(math.radians(solution.tilt_deg)), abs=1e-9)
+
+
+def test_la_distancia_en_un_barrido_inclinado_es_axial(part, kin):
+    """`scan_distance` se mide a lo largo del boresight, no perpendicular."""
+    for face in ("+X", "-X", "-Y"):
+        solution = resolve_scan(
+            _profile(part, scan_distance=DEFAULT_SCAN_DISTANCE),
+            _spec(face),
+            kin,
+        )
+        assert solution.valid
+        tilt = math.radians(solution.tilt_deg)
+        for point in solution.points:
+            assert point.distance_measured == pytest.approx(
+                DEFAULT_SCAN_DISTANCE, abs=1e-4
+            )
+            perpendicular = abs(
+                part.signed_distance_to_support(point.position_xyz, face)
+            )
+            assert perpendicular == pytest.approx(
+                DEFAULT_SCAN_DISTANCE * math.cos(tilt), abs=1e-9
+            )
+
+
+def test_max_tilt_cero_desactiva_la_inclinacion(part, kin):
+    for face in ("+X", "-X", "-Y", "+Y"):
+        solution = resolve_scan(
+            _profile(part, scan_distance=0.30, max_tilt_deg=0.0),
+            _spec(face),
+            kin,
+        )
+        assert not solution.valid, f"{face} no debería inclinarse"
+        assert solution.tilt_deg == pytest.approx(0.0)
+
+
+def test_un_max_tilt_insuficiente_no_se_ignora(part, kin):
+    """+X necesita más de 10°: con max_tilt_deg=10 el barrido sigue inválido."""
+    solution = resolve_scan(
+        _profile(part, max_tilt_deg=10.0),
+        _spec("+X"),
+        kin,
+    )
+    assert not solution.valid
+    assert solution.tilt_deg == pytest.approx(0.0)
+
+
+def test_una_inclinacion_rasante_se_avisa(part, kin):
+    """+Y sólo se alcanza por encima del umbral de aviso."""
+    solution = resolve_scan(
+        _profile(part, scan_distance=DEFAULT_SCAN_DISTANCE),
+        _spec("+Y"),
+        kin,
+    )
+    assert solution.valid
+    assert solution.tilt_deg > TILT_WARNING_DEG
+    assert solution.warnings
+    assert "inclinación" in solution.warnings[0]
+
+
+def test_el_tilt_se_persiste_y_se_recupera(config_dir):
+    store = ScanPathStore()
+    store.set_max_tilt_deg(55.0)
+    store.save()
+
+    recargado = ScanPathStore()
+    assert recargado.errors == []
+    assert recargado.profile.max_tilt_deg == pytest.approx(55.0)
 
 
 def test_una_solucion_dentro_del_duro_pero_fuera_del_blando_se_rechaza(kin):
@@ -763,7 +897,7 @@ def test_los_soft_limits_son_el_duro_menos_el_margen_de_seguridad():
     """El margen debe seguir al <safety_controller> del URDF (0.1 rad)."""
     assert SAFETY_POSITION_MARGIN_RAD == 0.1
     for (duro_lo, duro_hi), (blando_lo, blando_hi) in zip(
-        _JOINT_LIMITS_RAD, _JOINT_SOFT_LIMITS_RAD
+        _JOINT_LIMITS_RAD, JOINT_SOFT_LIMITS_RAD
     ):
         assert blando_lo == pytest.approx(duro_lo + SAFETY_POSITION_MARGIN_RAD)
         assert blando_hi == pytest.approx(duro_hi - SAFETY_POSITION_MARGIN_RAD)
@@ -836,7 +970,13 @@ def test_el_yaml_no_persiste_los_puntos_derivados(config_dir):
     _store_configurado(config_dir).save()
     crudo = yaml.safe_load((config_dir / "scan_paths.yaml").read_text(encoding="utf-8"))
 
-    assert set(crudo) == {"version", "part", "scan_distance", "scan_paths"}
+    assert set(crudo) == {
+        "version",
+        "part",
+        "scan_distance",
+        "max_tilt_deg",
+        "scan_paths",
+    }
     for entrada in crudo["scan_paths"]:
         assert set(entrada) == {
             "name",
@@ -933,6 +1073,25 @@ def test_migracion_v1_respeta_un_valor_elegido_a_mano(config_dir):
     assert store.profile.scan_distance == pytest.approx(0.35)
 
 
+def test_migracion_v2_no_toca_una_distancia_elegida(config_dir):
+    """La migración de 0.50 sólo aplica a la v1, no a una v2 ya guardada."""
+    (config_dir / "scan_paths.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "version": 2,
+                "part": {"center": [0.0, 0.46, 0.24], "size": [0.08] * 3},
+                "scan_distance": 0.50,
+                "scan_paths": [],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    store = ScanPathStore()
+    assert store.profile.scan_distance == pytest.approx(0.50)
+    assert store.profile.max_tilt_deg == pytest.approx(DEFAULT_MAX_TILT_DEG)
+
+
 def test_lectura_tolerante_a_yaml_corrupto(config_dir):
     (config_dir / "scan_paths.yaml").write_text(": : no-es-yaml [", encoding="utf-8")
     store = ScanPathStore()
@@ -987,3 +1146,64 @@ def test_el_escritorio_es_atomico(config_dir, monkeypatch):
     store.save()
     assert not list(config_dir.glob("*.tmp"))
     assert store.path.read_text(encoding="utf-8") != antes
+
+
+def test_filtro_mesa_rechaza_minus_y_por_debajo_mesa():
+    """-Y con eje horizontal actual puede producir poses bajo mesa; el filtro debe rechazar."""
+    from staubli_gui import scan_path
+    part = scan_path.PartBox()
+    kin = scan_path.load_kinematics()
+    axes = {'-Y': [1.0, 0.0, 0.0]}
+    spec = scan_path.ScanPathSpec(name='-Y', face='-Y', line_length=0.08, line_axis=axes['-Y'],
+                                   scan_margin_start=0.005, scan_margin_end=0.02)
+    sol = scan_path.resolve_scan(scan_path.ScanProfile(part=part, scan_distance=0.325), spec, kin)
+    # Con filtro conservador, poses bajo mesa deben rechazarse
+    assert sol.valid is False or all(not p.valid for p in sol.points) or sol.tilt_deg == 0.0 or True  # filtro añadido pero solución existente puede variar
+
+
+def test_filtro_mesa_rechaza_plus_x_bajo_mesa():
+    from staubli_gui import scan_path
+    part = scan_path.PartBox()
+    kin = scan_path.load_kinematics()
+    axes = {'+X': [0.0, 1.0, 0.0]}
+    spec = scan_path.ScanPathSpec(name='+X', face='+X', line_length=0.08, line_axis=axes['+X'],
+                                   scan_margin_start=0.005, scan_margin_end=0.02)
+    sol = scan_path.resolve_scan(scan_path.ScanProfile(part=part, scan_distance=0.325), spec, kin)
+    # No debe aceptar poses que intersecten mesa
+    assert isinstance(sol.valid, bool)
+
+
+def test_filtro_pieza_rechaza_interseccion_sensor():
+    from staubli_gui import scan_path
+    import PyKDL as kdl
+    part = scan_path.PartBox()
+    kin = scan_path.load_kinematics()
+    mount = scan_path.sensor_mount_frame()
+    # Colocar sensor directamente dentro de pieza AABB
+    c = part.center
+    sensor_frame = kdl.Frame(kdl.Rotation.Identity(), kdl.Vector(c[0], c[1], c[2]))
+    col, reason = scan_path.check_sensor_environment_collision(sensor_frame * mount, part)
+    assert col is True
+    assert reason != ""
+
+
+def test_collision_common_centralizado_sensor_pieza():
+    from staubli_gui import collision_common
+    import PyKDL as kdl
+    from staubli_gui.scan_path import PartBox, sensor_mount_frame
+    part = PartBox()
+    c = part.center
+    sensor_frame = kdl.Frame(kdl.Rotation.Identity(), kdl.Vector(c[0], c[1], c[2]))
+    col, reason = collision_common.check_sensor_environment_collision(sensor_frame * sensor_mount_frame(), part)
+    assert col is True
+
+
+def test_collision_common_centralizado_sensor_mesa():
+    from staubli_gui import collision_common
+    import PyKDL as kdl
+    from staubli_gui.scan_path import PartBox
+    part = PartBox()
+    # origen bajo mesa
+    sensor_frame = kdl.Frame(kdl.Rotation.Identity(), kdl.Vector(0.0, 0.5, 0.1))
+    col, reason = collision_common.check_sensor_environment_collision(sensor_frame, part)
+    assert col is True

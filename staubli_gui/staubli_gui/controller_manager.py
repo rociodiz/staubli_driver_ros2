@@ -91,9 +91,12 @@ class ControllerManager:
         """
         if not self._switch_client.service_is_ready():
             if done_callback:
-                self._node.get_logger().warn(
-                    "servicio /controller_manager/switch_controller no disponible"
-                )
+                try:
+                    self._node.get_logger().warning(
+                        "servicio /controller_manager/switch_controller no disponible"
+                    )
+                except Exception:
+                    print("[ControllerManager] servicio /controller_manager/switch_controller no disponible")
                 done_callback(False, dict(self._states),
                               "controller_manager no disponible")
             return False

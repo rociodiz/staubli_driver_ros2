@@ -204,8 +204,8 @@ def test_las_distancias_de_trabajo_son_validas_para_esta_pieza(ventana):
 
 
 def test_una_cara_no_alcanzable_se_muestra_invalida(ventana):
-    """+Y no resuelve: la GUI lo dice, no lo descarta."""
-    _regenerar(ventana, face="+Y")
+    """-Z (sobre la mesa) no resuelve: la GUI lo dice, no lo descarta."""
+    _regenerar(ventana, face="-Z")
     assert not ventana._scan_solution.valid
     assert ventana._scan_verdict.text().startswith("✗")
     assert "NO VÁLIDO" in ventana._scan_verdict.text()
@@ -227,13 +227,14 @@ def test_la_celda_culpable_coincide_con_scan_path(ventana):
 
 
 def test_la_fila_se_pinta_de_rojo_cuando_el_punto_no_es_valido(ventana):
-    _regenerar(ventana, face="+Y")
+    _regenerar(ventana, face="-Z")
     rojo = ventana._scan_table.item(0, COL_IK).background().color().name()
     assert rojo == gui_mod._ROJO
 
 
 def test_un_limite_articular_se_nombra_en_la_tabla(ventana):
-    """-X a 350 mm resuelve P1 pero joint_5 se sale de rango."""
+    """-X a 350 mm sin inclinar: P1 resuelve pero joint_5 se sale de rango."""
+    ventana._scan_store.profile.max_tilt_deg = 0.0
     _regenerar(ventana, face="-X", dist_mm=350)
     solution = ventana._scan_solution
     assert solution.offending_joints, "se esperaba joint_5 fuera de rango"
@@ -299,9 +300,16 @@ def test_una_direccion_imposible_no_rompe_la_gui(ventana):
 def test_guardar_escribe_el_esquema_de_scan_path(ventana):
     ventana.btn_scan_save.click()
     data = yaml.safe_load(ventana._scan_store.path.read_text(encoding="utf-8"))
-    assert set(data) == {"version", "part", "scan_distance", "scan_paths"}
-    assert data["version"] == 2
+    assert set(data) == {
+        "version",
+        "part",
+        "scan_distance",
+        "max_tilt_deg",
+        "scan_paths",
+    }
+    assert data["version"] == 3
     assert data["scan_distance"] == pytest.approx(0.325)
+    assert data["max_tilt_deg"] == pytest.approx(80.0)
     spec = data["scan_paths"][0]
     assert spec["face"] == "+Z"
     assert spec["line_length"] == pytest.approx(0.08)
@@ -354,10 +362,10 @@ def test_reabrir_reconstruye_los_puntos_desde_el_yaml(ventana):
 
 def test_reabrir_con_una_config_no_alcanzable_la_muestra_invalida(ventana):
     """Requisito: config inalcanzable visible, nunca descartada en silencio."""
-    _regenerar(ventana, face="+Y")
+    _regenerar(ventana, face="-Z")
     ventana.btn_scan_save.click()
     reabierta = gui_mod.MainWindow(ros_node=None)
-    assert reabierta._scan_face_combo.currentText() == "+Y"
+    assert reabierta._scan_face_combo.currentText() == "-Z"
     assert reabierta._scan_solution is not None
     assert not reabierta._scan_solution.valid
     assert reabierta._scan_verdict.text().startswith("✗")

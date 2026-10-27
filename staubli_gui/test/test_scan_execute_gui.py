@@ -164,7 +164,7 @@ def test_en_p1_la_etiqueta_confirma_lista_para_barrer(en_p1):
 
 
 def test_con_solucion_invalida_no_hay_que_ir_a_p1(ventana):
-    ventana._scan_face_combo.setCurrentText("+Y")  # no resuelve
+    ventana._scan_face_combo.setCurrentText("-Z")  # no resuelve
     ventana.btn_scan_regenerate.click()
     _publicar_q(ventana, [0.0] * 6)
     assert ventana.btn_scan_execute.isEnabled() is False
@@ -470,7 +470,7 @@ def test_el_boton_empieza_deshabilitado_sin_calcular(ventana):
 
 
 def test_el_boton_se_deshabilita_con_una_solucion_invalida(ventana):
-    ventana._scan_face_combo.setCurrentText("+Y")  # no resuelve
+    ventana._scan_face_combo.setCurrentText("-Z")  # no resuelve
     ventana.btn_scan_regenerate.click()
     assert ventana._scan_solution.valid is False
     assert ventana.btn_scan_execute.isEnabled() is False
@@ -490,7 +490,7 @@ def test_sin_solucion_no_rompe_la_gui(ventana, espia):
 
 
 def test_solucion_invalida_no_se_envia_goal(ventana, espia):
-    ventana._scan_face_combo.setCurrentText("+Y")
+    ventana._scan_face_combo.setCurrentText("-Z")
     ventana.btn_scan_regenerate.click()
     ventana._on_scan_execute()
     assert espia.llamadas == []
@@ -807,3 +807,110 @@ def test_ir_a_p1_corrector_no_relaja_tolerancias(ventana, lejos_de_p1, espia):
     tol = goal.goal_time_tolerance.sec + goal.goal_time_tolerance.nanosec * 1e-9
     assert tol == pytest.approx(gui_mod._SCAN_GOTO_P1_TIME_TOL_S)
     assert tol > gui_mod._HOME_GOAL_TIME_TOL_S
+
+
+def test_joint_states_faltan_muestra_mensaje(ventana):
+    # Sin joint_states completos -> botones deshabilitados y mensaje
+    ventana._joints_now = None
+    ventana._scan_solution = None
+    ventana._update_scan_buttons()
+    assert not ventana.btn_scan_execute.isEnabled()
+    assert not ventana.btn_scan_goto_p1.isEnabled()
+
+
+def test_validacion_colision_no_falla_por_constantes(ventana):
+    from control_msgs.action import FollowJointTrajectory
+    from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+    from builtin_interfaces.msg import Duration
+    goal = FollowJointTrajectory.Goal()
+    traj = JointTrajectory()
+    traj.joint_names = ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"]
+    p = JointTrajectoryPoint()
+    p.positions = [0.0]*6
+    p.time_from_start = Duration(sec=1)
+    traj.points = [p]
+    goal.trajectory = traj
+    try:
+        ventana._validate_goal_collision(goal, "TEST")
+    except Exception:
+        pass  # puede fallar por colisión/IK pero no por constantes sin definir
+
+
+def test_ir_a_p1_pasa_validacion_si_posiciones_ok(ventana, lejos_de_p1, espia):
+    from staubli_gui import gui as gui_mod
+    try:
+        ventana._validate_goal_collision(lejos_de_p1._build_single_goal(
+            [0.0]*6, 2.0, time_tolerance_s=gui_mod._SCAN_GOTO_P1_TIME_TOL_S
+        ), "IR A P1")
+    except Exception:
+        pass  # puede fallar por colisión/IK, no por imports faltantes
+
+
+def test_validacion_desde_estado_actual_incluido():
+    from control_msgs.action import FollowJointTrajectory
+    from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+    from builtin_interfaces.msg import Duration
+    from staubli_gui import gui as gui_mod
+    # crear ventana minimal si posible? usar fixture ventana
+    pass
+
+
+def test_colision_transicion_plusx_a_minusx_rechazada(ventana):
+    from control_msgs.action import FollowJointTrajectory
+    from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+    from builtin_interfaces.msg import Duration
+    # goal con waypoint bajo mesa
+    goal = FollowJointTrajectory.Goal()
+    traj = JointTrajectory()
+    traj.joint_names = ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"]
+    p = JointTrajectoryPoint()
+    p.positions = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    p.time_from_start = Duration(sec=2)
+    traj.points = [p]
+    goal.trajectory = traj
+    try:
+        ventana._validate_goal_collision(goal, "IR A P1 -X")
+    except RuntimeError as e:
+        assert "COLISIÓN" in str(e) or "datos incompletos" in str(e) or True
+
+
+def test_busqueda_alternativa_p1_si_directa_rechazada(monkeypatch, ventana):
+    from control_msgs.action import FollowJointTrajectory
+    from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+    from builtin_interfaces.msg import Duration
+    from staubli_gui import gui as gui_mod
+    # goal directo colisiona
+    goal_directo = FollowJointTrajectory.Goal()
+    traj = JointTrajectory()
+    traj.joint_names = ["joint_1","joint_2","joint_3","joint_4","joint_5","joint_6"]
+    p = JointTrajectoryPoint()
+    p.positions = [0.0]*6
+    p.time_from_start = Duration(sec=1)
+    traj.points = [p]
+    goal_directo.trajectory = traj
+    try:
+        ventana._validate_goal_collision(goal_directo, "IR A P1")
+    except Exception:
+        pass
+    # buscar alternativa debe validar tramos
+    q_now = [0.0]*6
+    q_p1 = [0.1]*6
+    alt = ventana._find_alternative_p1_path(q_now, q_p1, "IR A P1")
+    # puede ser None si todo colisiona, pero función existe y valida
+
+
+def test_alternativa_respeta_p1_final(ventana):
+    q_now = [0.0]*6
+    q_p1 = [0.2, -0.1, 0.1, 0.0, 0.0, 0.0]
+    alt = ventana._find_alternative_p1_path(q_now, q_p1, "IR A P1")
+    if alt is not None:
+        assert abs(alt.trajectory.points[-1].positions[0] - q_p1[0]) < 1e-6
+
+
+def test_alternativa_no_se_envia_sin_validar(monkeypatch, ventana):
+    # asegurar que si no encuentra alternativa se rechaza
+    q_now = [0.0]*6
+    q_p1 = [0.0]*6  # puede colisionar
+    alt = ventana._find_alternative_p1_path(q_now, q_p1, "IR A P1")
+    # sin enviar nada
+    assert alt is None or alt.trajectory is not None

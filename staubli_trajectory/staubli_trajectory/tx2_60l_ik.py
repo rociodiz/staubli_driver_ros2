@@ -165,10 +165,13 @@ SAFETY_POSITION_MARGIN_RAD = 0.1
 # +2.0359 rad (dentro del duro 2.0944, fuera del blando 1.9944), la GUI lo dio
 # por válido, y el goal murió con GOAL_TOLERANCE_VIOLATED con un error
 # residual de 0.0825 rad en joint_5.
-_JOINT_SOFT_LIMITS_RAD = [
+JOINT_SOFT_LIMITS_RAD = [
     (lo + SAFETY_POSITION_MARGIN_RAD, hi - SAFETY_POSITION_MARGIN_RAD)
     for lo, hi in _JOINT_LIMITS_RAD
 ]
+
+# Alias privado conservado por compatibilidad con código existente.
+_JOINT_SOFT_LIMITS_RAD = JOINT_SOFT_LIMITS_RAD
 
 # Tolerancias de validación del solver.
 _IK_POS_EPS = 1.0e-4   # m
@@ -337,7 +340,7 @@ class Tx260lKinematics:
         La holgura de 1e-6 es solo numérica: no se usa como margen de diseño.
         """
         per: List[bool] = []
-        for qj, (lo, hi) in zip(q, _JOINT_SOFT_LIMITS_RAD):
+        for qj, (lo, hi) in zip(q, JOINT_SOFT_LIMITS_RAD):
             per.append(lo - 1.0e-6 <= float(qj) <= hi + 1.0e-6)
         return all(per), per
 
